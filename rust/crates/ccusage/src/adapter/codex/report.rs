@@ -135,11 +135,7 @@ pub(crate) fn calculate_codex_model_cost(
         return 0.0;
     };
     let multiplier = if matches!(speed, CodexSpeed::Fast) {
-        if pricing.fast_multiplier == 1.0 {
-            2.0
-        } else {
-            pricing.fast_multiplier
-        }
+        pricing.fast_multiplier
     } else {
         1.0
     };

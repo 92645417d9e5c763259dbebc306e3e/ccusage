@@ -354,6 +354,25 @@ mod tests {
     }
 
     #[test]
+    fn does_not_assume_fast_pricing_without_a_model_multiplier() {
+        let pricing = PricingMap::load_embedded();
+        let usage = CodexModelUsage {
+            input_tokens: 100,
+            cached_input_tokens: 40,
+            output_tokens: 5,
+            reasoning_output_tokens: 0,
+            total_tokens: 105,
+            ..CodexModelUsage::default()
+        };
+
+        let standard =
+            calculate_codex_model_cost("gpt-5.6-sol", &usage, &pricing, CodexSpeed::Standard);
+        let fast = calculate_codex_model_cost("gpt-5.6-sol", &usage, &pricing, CodexSpeed::Fast);
+
+        assert!((fast - standard).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn identifies_codex_models_missing_pricing() {
         let mut pricing = PricingMap::default();
         pricing.load_json(
