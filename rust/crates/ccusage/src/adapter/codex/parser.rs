@@ -36,6 +36,10 @@ static THREAD_SPAWN_FINDER: LazyLock<Finder<'static>> =
     LazyLock::new(|| Finder::new(b"thread_spawn"));
 static FORKED_FROM_ID_FINDER: LazyLock<Finder<'static>> =
     LazyLock::new(|| Finder::new(b"forked_from_id"));
+static INTER_AGENT_COMMUNICATION_METADATA_FINDER: LazyLock<Finder<'static>> =
+    LazyLock::new(|| Finder::new(b"inter_agent_communication_metadata"));
+static TASK_STARTED_FINDER: LazyLock<Finder<'static>> =
+    LazyLock::new(|| Finder::new(b"task_started"));
 
 const CODEX_AUTO_REVIEW_MODEL: &str = "codex-auto-review";
 const CODEX_AUTO_REVIEW_FALLBACKS_JSON: &str = include_str!("codex-auto-review-fallbacks.json");
@@ -62,6 +66,126 @@ enum CodexLineKind {
 struct CodexExecTimestamps {
     event: String,
     model: String,
+}
+
+#[derive(Clone, Copy)]
+enum CodexReplayMode {
+    UntilSubagentTurn,
+    TimestampSecond([u8; 19]),
+}
+
+fn codex_replay_mode(path: &Path) -> Option<CodexReplayMode> {
+    if is_current_codex_subagent_session(path) {
+        return Some(CodexReplayMode::UntilSubagentTurn);
+    }
+    is_codex_replay_session(path)
+        .then(|| detect_replay_second(path))
+        .flatten()
+        .map(CodexReplayMode::TimestampSecond)
+}
+
+fn is_current_codex_subagent_session(path: &Path) -> bool {
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let Ok(n) = reader.read_until(b'\n', &mut line) else {
+        return false;
+    };
+    if n == 0 {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<CodexSessionLogEntry<'_>>(&line) else {
+        return false;
+    };
+    value.entry_type.as_deref() == Some("session_meta")
+        && THREAD_SPAWN_FINDER.find(&line).is_some()
+        && value.payload.as_ref().is_some_and(|payload| {
+            payload.thread_source.as_deref() == Some("subagent")
+                && payload.multi_agent_version.as_deref() == Some("v2")
+                && payload
+                    .cli_version
+                    .as_deref()
+                    .is_some_and(codex_cli_uses_subagent_turn_marker)
+        })
+}
+
+fn codex_cli_uses_subagent_turn_marker(version: &str) -> bool {
+    let version = version
+        .strip_prefix("rust-v")
+        .or_else(|| version.strip_prefix('v'))
+        .unwrap_or(version);
+    let version = version
+        .split_once('+')
+        .map_or(version, |(version, _)| version);
+    let (core, prerelease) = version
+        .split_once('-')
+        .map_or((version, None), |(core, prerelease)| {
+            (core, Some(prerelease))
+        });
+    let mut components = core.split('.');
+    let Some(major) = components.next().and_then(|part| part.parse::<u64>().ok()) else {
+        return false;
+    };
+    let Some(minor) = components.next().and_then(|part| part.parse::<u64>().ok()) else {
+        return false;
+    };
+    let Some(patch) = components.next().and_then(|part| part.parse::<u64>().ok()) else {
+        return false;
+    };
+    if components.next().is_some() {
+        return false;
+    }
+    match (major, minor, patch).cmp(&(0, 143, 0)) {
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Equal => match prerelease {
+            None => true,
+            Some(prerelease) => {
+                prerelease
+                    .strip_prefix("alpha.")
+                    .and_then(|version| version.split('.').next())
+                    .and_then(|version| version.parse::<u64>().ok())
+                    .is_some_and(|version| version >= 15)
+                    || prerelease.starts_with("beta.")
+                    || prerelease.starts_with("rc.")
+            }
+        },
+    }
+}
+
+fn is_codex_subagent_turn_start(line: &[u8]) -> bool {
+    if INTER_AGENT_COMMUNICATION_METADATA_FINDER
+        .find(line)
+        .is_none()
+    {
+        return false;
+    }
+    serde_json::from_slice::<CodexSessionLogEntry<'_>>(line)
+        .ok()
+        .is_some_and(|value| {
+            value.entry_type.as_deref() == Some("inter_agent_communication_metadata")
+                && value
+                    .payload
+                    .as_ref()
+                    .is_some_and(|payload| payload.trigger_turn == Some(true))
+        })
+}
+
+fn is_codex_task_started(line: &[u8]) -> bool {
+    if TASK_STARTED_FINDER.find(line).is_none() {
+        return false;
+    }
+    serde_json::from_slice::<CodexSessionLogEntry<'_>>(line)
+        .ok()
+        .is_some_and(|value| {
+            value.entry_type.as_deref() == Some("event_msg")
+                && value
+                    .payload
+                    .as_ref()
+                    .is_some_and(|payload| payload.payload_type.as_deref() == Some("task_started"))
+        })
 }
 
 fn is_codex_replay_session(path: &Path) -> bool {
@@ -140,10 +264,7 @@ pub(super) fn visit_codex_session_file(
     path: &Path,
     mut visit: impl FnMut(CodexTokenUsageEvent) -> Result<()>,
 ) -> Result<()> {
-    let is_replay_session = is_codex_replay_session(path);
-    let replay_second = is_replay_session
-        .then(|| detect_replay_second(path))
-        .flatten();
+    let replay_mode = codex_replay_mode(path);
     let Ok(file) = fs::File::open(path) else {
         return Ok(());
     };
@@ -154,7 +275,8 @@ pub(super) fn visit_codex_session_file(
     let mut current_model: Option<String> = None;
     let mut current_model_is_fallback = false;
     let fallback_timestamp = file_modified_timestamp(path);
-    let mut skip_replay = replay_second.is_some();
+    let mut skip_replay = replay_mode.is_some();
+    let mut pending_subagent_events = Vec::new();
 
     loop {
         line.clear();
@@ -164,6 +286,23 @@ pub(super) fn visit_codex_session_file(
         if bytes_read == 0 {
             break;
         }
+        if skip_replay
+            && matches!(replay_mode, Some(CodexReplayMode::UntilSubagentTurn))
+            && is_codex_task_started(&line)
+        {
+            pending_subagent_events.clear();
+            continue;
+        }
+        if skip_replay
+            && matches!(replay_mode, Some(CodexReplayMode::UntilSubagentTurn))
+            && is_codex_subagent_turn_start(&line)
+        {
+            skip_replay = false;
+            for event in pending_subagent_events.drain(..) {
+                visit(event)?;
+            }
+            continue;
+        }
         let Some(line_kind) = codex_line_usage_kind(&line) else {
             continue;
         };
@@ -172,23 +311,40 @@ pub(super) fn visit_codex_session_file(
                 let Ok(value) = serde_json::from_slice::<CodexSessionLogEntry<'_>>(&line) else {
                     continue;
                 };
-                if let Some(ref replay_ts) = replay_second
-                    && skip_replay
+                if skip_replay
                     && value.entry_type.as_deref() == Some("event_msg")
                     && value
                         .payload
                         .as_ref()
                         .is_some_and(|p| p.payload_type.as_deref() == Some("token_count"))
                 {
-                    let Some(ts) = codex_session_timestamp(value.timestamp.as_ref()) else {
-                        continue;
+                    let should_skip = match replay_mode {
+                        Some(CodexReplayMode::UntilSubagentTurn) => true,
+                        Some(CodexReplayMode::TimestampSecond(replay_second)) => {
+                            let Some(ts) = codex_session_timestamp(value.timestamp.as_ref()) else {
+                                continue;
+                            };
+                            ts.as_bytes().get(0..19).is_some_and(|second| {
+                                second.len() == 19 && second == replay_second.as_slice()
+                            })
+                        }
+                        None => false,
                     };
-                    let matches_replay = ts
-                        .as_bytes()
-                        .get(0..19)
-                        .is_some_and(|sec| sec.len() == 19 && sec == replay_ts.as_slice());
-                    if matches_replay {
-                        if let Some(total_usage) = value
+                    if should_skip {
+                        if matches!(replay_mode, Some(CodexReplayMode::UntilSubagentTurn)) {
+                            let mut buffer_event = |event| {
+                                pending_subagent_events.push(event);
+                                Ok(())
+                            };
+                            visit_codex_session_entry(
+                                &session_id,
+                                value,
+                                &mut previous_totals,
+                                &mut current_model,
+                                &mut current_model_is_fallback,
+                                &mut buffer_event,
+                            )?;
+                        } else if let Some(total_usage) = value
                             .payload
                             .as_ref()
                             .and_then(|payload| payload.info.as_ref())
@@ -199,7 +355,9 @@ pub(super) fn visit_codex_session_file(
                         }
                         continue;
                     }
-                    skip_replay = false;
+                    if matches!(replay_mode, Some(CodexReplayMode::TimestampSecond(_))) {
+                        skip_replay = false;
+                    }
                 }
                 visit_codex_session_entry(
                     &session_id,
@@ -267,13 +425,20 @@ fn visit_codex_session_entry(
     }
     let info = payload.info.as_ref();
     let total_usage = info.and_then(|info| info.total_token_usage.as_ref().copied());
-    let raw_usage = info
-        .and_then(|info| info.last_token_usage.as_ref().copied())
-        .or_else(|| {
-            total_usage
-                .as_ref()
-                .map(|usage| subtract_codex_raw_usage(usage, previous_totals.as_ref()))
-        });
+    let totals_unchanged = total_usage
+        .as_ref()
+        .zip(previous_totals.as_ref())
+        .is_some_and(|(current, previous)| current == previous);
+    let raw_usage = if totals_unchanged {
+        None
+    } else {
+        info.and_then(|info| info.last_token_usage.as_ref().copied())
+            .or_else(|| {
+                total_usage
+                    .as_ref()
+                    .map(|usage| subtract_codex_raw_usage(usage, previous_totals.as_ref()))
+            })
+    };
     if let Some(total_usage) = total_usage {
         *previous_totals = Some(total_usage);
     }
@@ -982,6 +1147,26 @@ fn subtract_codex_raw_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recognizes_codex_versions_with_subagent_turn_markers() {
+        for (version, expected) in [
+            ("0.142.0", false),
+            ("0.143.0-alpha.14", false),
+            ("0.143.0-alpha.15", true),
+            ("0.143.0-beta.1", true),
+            ("0.143.0", true),
+            ("0.144.1", true),
+            ("rust-v0.143.0-alpha.15", true),
+            ("not-a-version", false),
+        ] {
+            assert_eq!(
+                codex_cli_uses_subagent_turn_marker(version),
+                expected,
+                "unexpected marker support for {version}"
+            );
+        }
+    }
 
     #[test]
     fn loads_codex_auto_review_fallbacks_from_models_dev_snapshot() {

@@ -973,6 +973,552 @@ mod tests {
     }
 
     #[test]
+    fn skips_repeated_last_usage_when_cumulative_totals_do_not_change() {
+        let repeated_usage = json!({
+            "last_token_usage": {
+                "input_tokens": 1_000,
+                "cached_input_tokens": 100,
+                "output_tokens": 200,
+                "total_tokens": 1_200,
+            },
+            "total_token_usage": {
+                "input_tokens": 1_000,
+                "cached_input_tokens": 100,
+                "output_tokens": 200,
+                "total_tokens": 1_200,
+            },
+        });
+        let fixture = fs_fixture!({
+            "2026-05-12T08-00-00-session.jsonl": [
+                json!({
+                    "timestamp": "2026-05-12T08:00:00.000Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:01:00.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": &repeated_usage,
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:01:01.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": &repeated_usage,
+                    },
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+
+        let events = load_codex_events_from_directory(fixture.root(), true).unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].input_tokens, 1_000);
+        assert_eq!(events[0].cached_input_tokens, 100);
+        assert_eq!(events[0].output_tokens, 200);
+        assert_eq!(events[0].total_tokens, 1_200);
+    }
+
+    #[test]
+    fn skips_multi_second_replay_until_subagent_turn_starts() {
+        let fixture = fs_fixture!({
+            "2026-05-12T08-03-00-subagent.jsonl": [
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.000Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "subagent-abc",
+                        "cli_version": "0.144.1",
+                        "forked_from_id": "parent-xyz",
+                        "thread_source": "subagent",
+                        "multi_agent_version": "v2",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": "parent-xyz"
+                                }
+                            }
+                        }
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.000Z",
+                    "type": "session_meta",
+                    "payload": {"id": "parent-xyz"},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.000Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.5"},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.100Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 1_000,
+                                "cached_input_tokens": 100,
+                                "output_tokens": 200,
+                                "total_tokens": 1_200,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_000,
+                                "cached_input_tokens": 100,
+                                "output_tokens": 200,
+                                "total_tokens": 1_200,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.900Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 500,
+                                "cached_input_tokens": 50,
+                                "output_tokens": 100,
+                                "total_tokens": 600,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_500,
+                                "cached_input_tokens": 150,
+                                "output_tokens": 300,
+                                "total_tokens": 1_800,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:01.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 250,
+                                "cached_input_tokens": 25,
+                                "output_tokens": 50,
+                                "total_tokens": 300,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_750,
+                                "cached_input_tokens": 175,
+                                "output_tokens": 350,
+                                "total_tokens": 2_100,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:02.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:02.050Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:02.100Z",
+                    "type": "inter_agent_communication_metadata",
+                    "payload": {"trigger_turn": true},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:03.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 100,
+                                "cached_input_tokens": 10,
+                                "output_tokens": 20,
+                                "total_tokens": 120,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_850,
+                                "cached_input_tokens": 185,
+                                "output_tokens": 370,
+                                "total_tokens": 2_220,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+
+        for single_thread in [true, false] {
+            let events = load_codex_events_from_directory(fixture.root(), single_thread).unwrap();
+
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].model.as_deref(), Some("gpt-5.6-sol"));
+            assert_eq!(events[0].input_tokens, 100);
+            assert_eq!(events[0].cached_input_tokens, 10);
+            assert_eq!(events[0].output_tokens, 20);
+            assert_eq!(events[0].total_tokens, 120);
+        }
+    }
+
+    #[test]
+    fn counts_child_usage_between_task_start_and_inter_agent_marker() {
+        let fixture = fs_fixture!({
+            "2026-05-12T08-03-00-subagent.jsonl": [
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.000Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "subagent-abc",
+                        "cli_version": "0.144.1",
+                        "forked_from_id": "parent-xyz",
+                        "thread_source": "subagent",
+                        "multi_agent_version": "v2",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": "parent-xyz"
+                                }
+                            }
+                        }
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.050Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.100Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 1_000,
+                                "cached_input_tokens": 100,
+                                "output_tokens": 200,
+                                "total_tokens": 1_200,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_000,
+                                "cached_input_tokens": 100,
+                                "output_tokens": 200,
+                                "total_tokens": 1_200,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:01.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 500,
+                                "cached_input_tokens": 50,
+                                "output_tokens": 100,
+                                "total_tokens": 600,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_500,
+                                "cached_input_tokens": 150,
+                                "output_tokens": 300,
+                                "total_tokens": 1_800,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:02.000Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started"},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:02.075Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 100,
+                                "cached_input_tokens": 10,
+                                "output_tokens": 20,
+                                "total_tokens": 120,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_600,
+                                "cached_input_tokens": 160,
+                                "output_tokens": 320,
+                                "total_tokens": 1_920,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:02.090Z",
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6-sol"},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:02.100Z",
+                    "type": "inter_agent_communication_metadata",
+                    "payload": {"trigger_turn": true},
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:03.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 50,
+                                "cached_input_tokens": 5,
+                                "output_tokens": 10,
+                                "total_tokens": 60,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_650,
+                                "cached_input_tokens": 165,
+                                "output_tokens": 330,
+                                "total_tokens": 1_980,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+
+        let events = load_codex_events_from_directory(fixture.root(), true).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(events[0].input_tokens, 100);
+        assert_eq!(events[0].cached_input_tokens, 10);
+        assert_eq!(events[0].output_tokens, 20);
+        assert_eq!(events[0].total_tokens, 120);
+        assert_eq!(events[1].input_tokens, 50);
+        assert_eq!(events[1].cached_input_tokens, 5);
+        assert_eq!(events[1].output_tokens, 10);
+        assert_eq!(events[1].total_tokens, 60);
+    }
+
+    #[test]
+    fn skips_replay_only_subagent_session_that_never_starts() {
+        let fixture = fs_fixture!({
+            "2026-05-12T08-03-00-subagent.jsonl": [
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.000Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "subagent-abc",
+                        "cli_version": "0.144.1",
+                        "forked_from_id": "parent-xyz",
+                        "thread_source": "subagent",
+                        "multi_agent_version": "v2",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": "parent-xyz"
+                                }
+                            }
+                        }
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.100Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 1_000,
+                                "cached_input_tokens": 100,
+                                "output_tokens": 200,
+                                "total_tokens": 1_200,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_000,
+                                "cached_input_tokens": 100,
+                                "output_tokens": 200,
+                                "total_tokens": 1_200,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:01.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 500,
+                                "cached_input_tokens": 50,
+                                "output_tokens": 100,
+                                "total_tokens": 600,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_500,
+                                "cached_input_tokens": 150,
+                                "output_tokens": 300,
+                                "total_tokens": 1_800,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+
+        for single_thread in [true, false] {
+            let events = load_codex_events_from_directory(fixture.root(), single_thread).unwrap();
+
+            assert!(events.is_empty());
+        }
+    }
+
+    #[test]
+    fn uses_timestamp_replay_fallback_for_pre_marker_v2_subagents() {
+        let fixture = fs_fixture!({
+            "2026-05-12T08-03-00-subagent.jsonl": [
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.000Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "subagent-abc",
+                        "cli_version": "0.142.0",
+                        "forked_from_id": "parent-xyz",
+                        "thread_source": "subagent",
+                        "multi_agent_version": "v2",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": {
+                                    "parent_thread_id": "parent-xyz"
+                                }
+                            }
+                        }
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.100Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 1_000,
+                                "cached_input_tokens": 100,
+                                "output_tokens": 200,
+                                "total_tokens": 1_200,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_000,
+                                "cached_input_tokens": 100,
+                                "output_tokens": 200,
+                                "total_tokens": 1_200,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:03:00.900Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 500,
+                                "cached_input_tokens": 50,
+                                "output_tokens": 100,
+                                "total_tokens": 600,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_500,
+                                "cached_input_tokens": 150,
+                                "output_tokens": 300,
+                                "total_tokens": 1_800,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-05-12T08:04:00.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 100,
+                                "cached_input_tokens": 10,
+                                "output_tokens": 20,
+                                "total_tokens": 120,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 1_600,
+                                "cached_input_tokens": 160,
+                                "output_tokens": 320,
+                                "total_tokens": 1_920,
+                            },
+                            "model": "gpt-5.2",
+                        },
+                    },
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+
+        let events = load_codex_events_from_directory(fixture.root(), true).unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].input_tokens, 100);
+        assert_eq!(events[0].cached_input_tokens, 10);
+        assert_eq!(events[0].output_tokens, 20);
+        assert_eq!(events[0].total_tokens, 120);
+    }
+
+    #[test]
     fn skips_replayed_parent_token_history_in_forked_session_files() {
         let fixture = fs_fixture!({
             "2026-05-12T08-00-00-parent.jsonl": [
