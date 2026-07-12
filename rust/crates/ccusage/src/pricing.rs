@@ -453,8 +453,11 @@ impl PricingMap {
     }
 
     fn find_entry_or_alias(&self, model: &str) -> Option<Pricing> {
-        self.find_entry(model)
+        self.entries
+            .get(model)
+            .copied()
             .or_else(|| pricing_alias(model).and_then(|alias| self.find_entry(alias)))
+            .or_else(|| self.find_entry(model))
     }
 
     fn find_entry(&self, model: &str) -> Option<Pricing> {
@@ -500,8 +503,11 @@ impl PricingMap {
     }
 
     fn context_limit_entry_or_alias(&self, model: &str) -> Option<u64> {
-        self.context_limit_entry(model)
+        self.context_limits
+            .get(model)
+            .copied()
             .or_else(|| pricing_alias(model).and_then(|alias| self.context_limit_entry(alias)))
+            .or_else(|| self.context_limit_entry(model))
     }
 
     fn context_limit_entry(&self, model: &str) -> Option<u64> {
@@ -534,6 +540,7 @@ impl PricingMap {
             .entries
             .get(model)
             .copied()
+            .or_else(|| pricing_alias(model).and_then(|alias| self.entries.get(alias).copied()))
             .unwrap_or_else(Pricing::empty);
 
         let new_input = override_value.input_cost_per_token.unwrap_or(base.input);
@@ -1353,7 +1360,9 @@ fn builtin_long_context_rates(base_model: &str) -> Option<LongContextRates> {
 /// `Pricing::long_context_threshold`, and falls back to the default 200K
 /// boundary used for LiteLLM `*_above_200k_tokens` data.
 pub(crate) fn long_context_split_threshold(model: &str) -> u64 {
-    builtin_long_context_rates(model_without_date_suffix(model))
+    let base_model = model_without_date_suffix(model);
+    let canonical_model = pricing_alias(base_model).unwrap_or(base_model);
+    builtin_long_context_rates(canonical_model)
         .map(|rates| rates.threshold)
         .unwrap_or(DEFAULT_LONG_CONTEXT_THRESHOLD_TOKENS)
 }
@@ -1385,10 +1394,10 @@ fn model_without_date_suffix(model: &str) -> &str {
     model
 }
 
-/// Maps Codex log labels that upstream pricing sources do not publish to
-/// canonical pricing keys.
+/// Maps model aliases to canonical pricing keys before fuzzy matching.
 fn pricing_alias(model: &str) -> Option<&'static str> {
     match model {
+        "gpt-5.6" => Some("gpt-5.6-sol"),
         "gpt-5.3-spark" => Some("gpt-5.3-codex-spark"),
         _ => None,
     }
@@ -2073,6 +2082,25 @@ mod tests {
     }
 
     #[test]
+    fn gpt_5_6_alias_resolves_to_sol_across_pricing_metadata() {
+        let pricing = PricingMap::load_embedded();
+        let alias = pricing.find("gpt-5.6").unwrap();
+        let sol = pricing.find("gpt-5.6-sol").unwrap();
+
+        assert_eq!(alias.input, sol.input);
+        assert_eq!(alias.output, sol.output);
+        assert_eq!(alias.cache_create, sol.cache_create);
+        assert_eq!(alias.cache_read, sol.cache_read);
+        assert_eq!(alias.input_above_200k, sol.input_above_200k);
+        assert_eq!(alias.output_above_200k, sol.output_above_200k);
+        assert_eq!(
+            pricing.context_limit("gpt-5.6"),
+            pricing.context_limit("gpt-5.6-sol")
+        );
+        assert_eq!(long_context_split_threshold("gpt-5.6"), 272_000);
+    }
+
+    #[test]
     fn embedded_pricing_fills_gpt_long_context_tier_rates() {
         let pricing = PricingMap::load_embedded();
 
@@ -2569,6 +2597,31 @@ mod tests {
             assert!(entry.cache_read_explicit);
             assert_eq!(entry.fast_multiplier, 2.0);
             assert_eq!(pricing.context_limit("custom-model"), Some(123_456));
+        }
+
+        #[test]
+        fn exact_override_wins_over_gpt_5_6_alias() {
+            let mut pricing = PricingMap::load_embedded();
+            let sol = pricing.find("gpt-5.6-sol").unwrap();
+            let overrides = build_overrides("gpt-5.6", |o| {
+                o.input_cost_per_token = Some(42e-6);
+                o.max_input_tokens = Some(654_321);
+            });
+
+            pricing.apply_overrides(overrides.iter());
+
+            let entry = pricing.find("gpt-5.6").unwrap();
+            assert_eq!(entry.input, 42e-6);
+            assert_eq!(entry.output, sol.output);
+            assert_eq!(entry.cache_create, sol.cache_create);
+            assert_eq!(entry.cache_read, sol.cache_read);
+            assert_eq!(entry.input_above_200k, sol.input_above_200k);
+            assert_eq!(entry.output_above_200k, sol.output_above_200k);
+            assert_eq!(entry.cache_create_above_200k, sol.cache_create_above_200k);
+            assert_eq!(entry.cache_read_above_200k, sol.cache_read_above_200k);
+            assert_eq!(entry.long_context_threshold, sol.long_context_threshold);
+            assert_eq!(entry.fast_multiplier, sol.fast_multiplier);
+            assert_eq!(pricing.context_limit("gpt-5.6"), Some(654_321));
         }
 
         #[test]
