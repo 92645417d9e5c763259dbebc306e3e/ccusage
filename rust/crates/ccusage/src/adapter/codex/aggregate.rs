@@ -306,24 +306,42 @@ fn add_deduped_event_to_groups(
     shared: &SharedArgs,
     groups: &mut BTreeMap<String, CodexGroup>,
 ) -> Result<()> {
+    let Some(period) = codex_period_for(
+        timestamp,
+        Some(event.session_id.as_str()),
+        kind,
+        timezone,
+        shared,
+    ) else {
+        return Ok(());
+    };
+    let group = groups.entry(period).or_default();
+    accumulate_codex_event_into_group(group, event, model, false);
+    Ok(())
+}
+
+fn codex_period_for(
+    timestamp: crate::TimestampMs,
+    session_id: Option<&str>,
+    kind: AgentReportKind,
+    timezone: Option<&JiffTimeZone>,
+    shared: &SharedArgs,
+) -> Option<String> {
     let date = format_date_tz(timestamp, timezone);
     if shared.since.is_some() || shared.until.is_some() {
         let date_key = date.replace('-', "");
         if shared.since.as_ref().is_some_and(|since| &date_key < since)
             || shared.until.as_ref().is_some_and(|until| &date_key > until)
         {
-            return Ok(());
+            return None;
         }
     }
-    let period = match kind {
+    Some(match kind {
         AgentReportKind::Daily => date,
         AgentReportKind::Weekly => week_start(&date, WeekDay::Monday).unwrap_or(date),
         AgentReportKind::Monthly => date[..7].to_string(),
-        AgentReportKind::Session => event.session_id.clone(),
-    };
-    let group = groups.entry(period).or_default();
-    accumulate_codex_event_into_group(group, event, model, false);
-    Ok(())
+        AgentReportKind::Session => session_id?.to_string(),
+    })
 }
 
 fn accumulate_codex_event_into_group(
@@ -422,25 +440,14 @@ fn apply_recorded_usage_entries<'a>(
         let Some(service_tier) = record.service_tier else {
             continue;
         };
-        let date = format_date_tz(key.timestamp, timezone.as_ref());
-        if shared.since.is_some() || shared.until.is_some() {
-            let date_key = date.replace('-', "");
-            if shared.since.as_ref().is_some_and(|since| &date_key < since)
-                || shared.until.as_ref().is_some_and(|until| &date_key > until)
-            {
-                continue;
-            }
-        }
-        let period = match kind {
-            AgentReportKind::Daily => date,
-            AgentReportKind::Weekly => week_start(&date, WeekDay::Monday).unwrap_or(date),
-            AgentReportKind::Monthly => date[..7].to_string(),
-            AgentReportKind::Session => {
-                let Some(session_id) = record.session_id.as_ref() else {
-                    continue;
-                };
-                session_id.to_string()
-            }
+        let Some(period) = codex_period_for(
+            key.timestamp,
+            record.session_id.as_deref(),
+            kind,
+            timezone.as_ref(),
+            shared,
+        ) else {
+            continue;
         };
         let Some(model_usage) = groups
             .get_mut(&period)
@@ -659,6 +666,72 @@ mod tests {
         PricingMap, adapter::codex::paths::CodexUsageSource, cli::CodexSpeed,
         model_aliases::set_model_aliases_for_tests,
     };
+
+    #[test]
+    fn selects_codex_period_for_each_report_kind() {
+        let timestamp = parse_ts_timestamp("2026-05-29T08:01:00.000Z").unwrap();
+        let timezone = parse_tz(Some("UTC")).unwrap();
+        let shared = SharedArgs::default();
+
+        for (kind, expected) in [
+            (AgentReportKind::Daily, "2026-05-29"),
+            (AgentReportKind::Weekly, "2026-05-25"),
+            (AgentReportKind::Monthly, "2026-05"),
+            (AgentReportKind::Session, "sessions/child.jsonl"),
+        ] {
+            assert_eq!(
+                codex_period_for(
+                    timestamp,
+                    Some("sessions/child.jsonl"),
+                    kind,
+                    Some(&timezone),
+                    &shared,
+                )
+                .as_deref(),
+                Some(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn omits_codex_period_outside_date_bounds() {
+        let timezone = parse_tz(Some("UTC")).unwrap();
+        let shared = SharedArgs {
+            since: Some("20260528".to_string()),
+            until: Some("20260530".to_string()),
+            ..SharedArgs::default()
+        };
+
+        for timestamp in ["2026-05-27T23:59:59.000Z", "2026-05-31T00:00:00.000Z"] {
+            assert_eq!(
+                codex_period_for(
+                    parse_ts_timestamp(timestamp).unwrap(),
+                    Some("sessions/child.jsonl"),
+                    AgentReportKind::Daily,
+                    Some(&timezone),
+                    &shared,
+                ),
+                None,
+            );
+        }
+    }
+
+    #[test]
+    fn omits_session_period_without_session_id() {
+        let timestamp = parse_ts_timestamp("2026-05-29T08:01:00.000Z").unwrap();
+        let timezone = parse_tz(Some("UTC")).unwrap();
+
+        assert_eq!(
+            codex_period_for(
+                timestamp,
+                None,
+                AgentReportKind::Session,
+                Some(&timezone),
+                &SharedArgs::default(),
+            ),
+            None,
+        );
+    }
 
     #[test]
     fn dedupes_copied_token_usage_across_session_files() {
