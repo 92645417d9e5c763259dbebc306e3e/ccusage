@@ -6,8 +6,8 @@ use std::{
 use compact_str::CompactString;
 
 use crate::{
-    CodexTokenUsageEvent, Result, chunk_file_indexes_by_size, cli::SharedArgs, fast::FxHashSet,
-    progress,
+    CodexTokenUsageEvent, Result, chunk_file_indexes_by_size, cli::SharedArgs, fast::FxHashMap,
+    merge_codex_service_tiers, progress,
 };
 
 use super::{
@@ -123,9 +123,10 @@ fn read_codex_session_file(sessions_dir: &Path, path: &Path) -> Vec<CodexTokenUs
 }
 
 fn dedupe_codex_events(events: &mut Vec<CodexTokenUsageEvent>) {
-    let mut seen = FxHashSet::default();
-    events.retain(|event| {
-        seen.insert((
+    let mut indexes = FxHashMap::<_, usize>::default();
+    let mut deduped = Vec::<CodexTokenUsageEvent>::with_capacity(events.len());
+    for event in events.drain(..) {
+        let key = (
             CompactString::new(&event.timestamp),
             event.model.as_deref().map(CompactString::new),
             event.input_tokens,
@@ -133,8 +134,17 @@ fn dedupe_codex_events(events: &mut Vec<CodexTokenUsageEvent>) {
             event.output_tokens,
             event.reasoning_output_tokens,
             event.total_tokens,
-        ))
-    });
+        );
+        if let Some(index) = indexes.get(&key).copied() {
+            let retained = &mut deduped[index];
+            retained.service_tier =
+                merge_codex_service_tiers(retained.service_tier, event.service_tier);
+        } else {
+            indexes.insert(key, deduped.len());
+            deduped.push(event);
+        }
+    }
+    *events = deduped;
 }
 
 #[cfg(test)]
@@ -157,7 +167,136 @@ mod tests {
             reasoning_output_tokens: 0,
             total_tokens: 150,
             is_fallback_model: false,
+            service_tier: None,
         }
+    }
+
+    #[test]
+    fn records_service_tier_transitions_for_following_usage() {
+        let service_tier = |timestamp: &str, value: &str| {
+            json!({
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {
+                    "type": "thread_settings_applied",
+                    "thread_settings": {
+                        "service_tier": value,
+                    },
+                },
+            })
+            .to_string()
+        };
+        let token_count = |timestamp: &str, input_tokens: u64| {
+            json!({
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "model": "gpt-5.6-sol",
+                        "last_token_usage": {
+                            "input_tokens": input_tokens,
+                            "cached_input_tokens": 0,
+                            "output_tokens": 1,
+                            "total_tokens": input_tokens + 1,
+                        },
+                    },
+                },
+            })
+            .to_string()
+        };
+        let fixture = fs_fixture!({
+            "session.jsonl": [
+                service_tier("2026-07-22T00:00:00.000Z", "default"),
+                token_count("2026-07-22T00:00:01.000Z", 10),
+                service_tier("2026-07-22T00:00:02.000Z", "priority"),
+                token_count("2026-07-22T00:00:03.000Z", 20),
+                service_tier("2026-07-22T00:00:04.000Z", "default"),
+                token_count("2026-07-22T00:00:05.000Z", 30),
+                service_tier("2026-07-22T00:00:06.000Z", "fast"),
+                token_count("2026-07-22T00:00:07.000Z", 40),
+            ]
+            .join("\n"),
+        });
+
+        let events = load_codex_events_from_directory(fixture.root(), true).unwrap();
+
+        assert_eq!(events.len(), 4);
+        assert_eq!(
+            events[0].service_tier,
+            Some(crate::CodexServiceTier::Standard)
+        );
+        assert_eq!(events[1].service_tier, Some(crate::CodexServiceTier::Fast));
+        assert_eq!(
+            events[2].service_tier,
+            Some(crate::CodexServiceTier::Standard)
+        );
+        assert_eq!(events[3].service_tier, Some(crate::CodexServiceTier::Fast));
+    }
+
+    #[test]
+    fn leaves_unmarked_and_unsupported_service_tiers_unclassified() {
+        let fixture = fs_fixture!({
+            "session.jsonl": [
+                json!({
+                    "timestamp": "2026-07-22T00:00:00.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "model": "gpt-5.6-sol",
+                            "last_token_usage": {
+                                "input_tokens": 10,
+                                "output_tokens": 1,
+                                "total_tokens": 11,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-07-22T00:00:01.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "thread_settings_applied",
+                        "thread_settings": { "service_tier": "priority" },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-07-22T00:00:02.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "thread_settings_applied",
+                        "thread_settings": { "service_tier": "flex" },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-07-22T00:00:03.000Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "model": "gpt-5.6-sol",
+                            "last_token_usage": {
+                                "input_tokens": 20,
+                                "output_tokens": 1,
+                                "total_tokens": 21,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+
+        let events = load_codex_events_from_directory(fixture.root(), true).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].service_tier, None);
+        assert_eq!(events[1].service_tier, None);
     }
 
     #[test]
@@ -168,6 +307,44 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].session_id, "session-a");
+    }
+
+    #[test]
+    fn preserves_recorded_tier_when_deduping_matching_events() {
+        let unclassified = codex_event("session-a");
+        let mut fast = codex_event("session-b");
+        fast.service_tier = Some(crate::CodexServiceTier::Fast);
+
+        for mut events in [
+            vec![unclassified.clone(), fast.clone()],
+            vec![fast.clone(), unclassified.clone()],
+        ] {
+            dedupe_codex_events(&mut events);
+
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].service_tier, Some(crate::CodexServiceTier::Fast));
+        }
+    }
+
+    #[test]
+    fn resolves_conflicting_recorded_tiers_deterministically() {
+        let mut standard = codex_event("session-a");
+        standard.service_tier = Some(crate::CodexServiceTier::Standard);
+        let mut fast = codex_event("session-b");
+        fast.service_tier = Some(crate::CodexServiceTier::Fast);
+
+        for mut events in [
+            vec![standard.clone(), fast.clone()],
+            vec![fast.clone(), standard.clone()],
+        ] {
+            dedupe_codex_events(&mut events);
+
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0].service_tier,
+                Some(crate::CodexServiceTier::Standard)
+            );
+        }
     }
 
     #[test]
@@ -528,6 +705,7 @@ mod tests {
         assert_eq!(events[0].cached_input_tokens, 20);
         assert_eq!(events[0].output_tokens, 30);
         assert_eq!(events[0].total_tokens, 150);
+        assert_eq!(events[0].service_tier, None);
     }
 
     #[test]
@@ -1025,6 +1203,86 @@ mod tests {
         assert_eq!(events[0].cached_input_tokens, 100);
         assert_eq!(events[0].output_tokens, 200);
         assert_eq!(events[0].total_tokens, 1_200);
+    }
+
+    #[test]
+    fn does_not_inherit_replayed_parent_service_tier_after_task_start() {
+        let fixture = fs_fixture!({
+            "2026-07-22T08-03-00-subagent.jsonl": [
+                json!({
+                    "timestamp": "2026-07-22T08:03:00.000Z",
+                    "type": "session_meta",
+                    "payload": {
+                        "id": "subagent",
+                        "cli_version": "0.144.1",
+                        "thread_source": "subagent",
+                        "multi_agent_version": "v2",
+                        "source": {
+                            "subagent": {
+                                "thread_spawn": { "parent_thread_id": "parent" },
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-07-22T08:03:00.010Z",
+                    "type": "turn_context",
+                    "payload": { "model": "gpt-5.6-sol" },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-07-22T08:03:00.020Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "thread_settings_applied",
+                        "thread_settings": { "service_tier": "priority" },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-07-22T08:03:01.000Z",
+                    "type": "event_msg",
+                    "payload": { "type": "task_started" },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-07-22T08:03:01.100Z",
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "last_token_usage": {
+                                "input_tokens": 100,
+                                "cached_input_tokens": 10,
+                                "output_tokens": 20,
+                                "total_tokens": 120,
+                            },
+                            "total_token_usage": {
+                                "input_tokens": 100,
+                                "cached_input_tokens": 10,
+                                "output_tokens": 20,
+                                "total_tokens": 120,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+                json!({
+                    "timestamp": "2026-07-22T08:03:01.200Z",
+                    "type": "inter_agent_communication_metadata",
+                    "payload": { "trigger_turn": true },
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        });
+
+        let events = load_codex_events_from_directory(fixture.root(), true).unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].input_tokens, 100);
+        assert_eq!(events[0].service_tier, None);
     }
 
     #[test]

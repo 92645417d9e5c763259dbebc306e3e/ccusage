@@ -2227,6 +2227,9 @@ mod tests {
     fn embedded_pricing_includes_codex_priority_multiplier() {
         let pricing = PricingMap::load_embedded();
 
+        assert_eq!(pricing.find("gpt-5.6-sol").unwrap().fast_multiplier, 2.0);
+        assert_eq!(pricing.find("gpt-5.6-terra").unwrap().fast_multiplier, 2.0);
+        assert_eq!(pricing.find("gpt-5.6-luna").unwrap().fast_multiplier, 2.0);
         assert_eq!(pricing.find("gpt-5.5").unwrap().fast_multiplier, 2.5);
         assert_eq!(pricing.find("gpt-5.4").unwrap().fast_multiplier, 2.0);
         assert_eq!(pricing.find("gpt-5.3-codex").unwrap().fast_multiplier, 2.0);

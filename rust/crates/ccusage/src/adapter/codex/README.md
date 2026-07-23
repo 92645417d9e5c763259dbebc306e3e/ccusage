@@ -18,6 +18,14 @@ Relevant JSONL event:
 - `payload.info.last_token_usage` is the current turn delta.
 - If only cumulative totals exist, subtract prior totals to recover deltas.
 
+Relevant speed-setting event in Codex CLI 0.144.0 and later:
+
+- `type === "event_msg"`
+- `payload.type === "thread_settings_applied"`
+- `payload.thread_settings.service_tier === "priority"` (or legacy `"fast"`) selects Fast.
+- `payload.thread_settings.service_tier === "default"` selects Standard.
+- Token usage inherits the latest recognized setting in the rollout. Missing or unsupported settings remain unclassified so report policy can apply its documented fallback.
+
 Token mapping:
 
 - `input_tokens` - total input tokens.
