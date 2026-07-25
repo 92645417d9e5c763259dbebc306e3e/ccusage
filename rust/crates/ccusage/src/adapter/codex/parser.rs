@@ -430,11 +430,18 @@ fn visit_codex_session_entry(
         return Ok(());
     };
     if payload.payload_type.as_deref() == Some("thread_settings_applied") {
-        *current_service_tier = payload
+        // A settings event that carries no `service_tier` at all says nothing
+        // about the tier, so the previous one stands. Codex emits such events
+        // for auto-review threads. A tier that is present but unrecognized is
+        // different: it means the tier changed to something unknown, so the
+        // stale value must not be inherited.
+        if let Some(recorded) = payload
             .thread_settings
             .as_ref()
             .and_then(|settings| settings.service_tier.as_deref())
-            .and_then(codex_service_tier);
+        {
+            *current_service_tier = codex_service_tier(recorded);
+        }
         return Ok(());
     }
     if payload.payload_type.as_deref() != Some("token_count") {
