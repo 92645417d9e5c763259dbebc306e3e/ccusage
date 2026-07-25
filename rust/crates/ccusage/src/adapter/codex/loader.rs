@@ -1595,8 +1595,12 @@ mod tests {
         assert_eq!(events[1].total_tokens, 60);
     }
 
+    /// A subagent rollout whose turn-start marker never appears must not lose
+    /// its usage. With no marker to delimit the inherited prefix and no
+    /// repeated timestamp second to fall back on, there is no replay signal at
+    /// all, so every event is kept rather than the whole rollout discarded.
     #[test]
-    fn skips_replay_only_subagent_session_that_never_starts() {
+    fn keeps_subagent_usage_when_no_replay_boundary_is_detectable() {
         let fixture = fs_fixture!({
             "2026-05-12T08-03-00-subagent.jsonl": [
                 json!({
@@ -1669,7 +1673,9 @@ mod tests {
         for single_thread in [true, false] {
             let events = load_codex_events_from_directory(fixture.root(), single_thread).unwrap();
 
-            assert!(events.is_empty());
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].input_tokens, 1_000);
+            assert_eq!(events[1].input_tokens, 500);
         }
     }
 

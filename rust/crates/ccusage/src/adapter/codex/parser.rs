@@ -40,8 +40,8 @@ static THREAD_SPAWN_FINDER: LazyLock<Finder<'static>> =
     LazyLock::new(|| Finder::new(b"thread_spawn"));
 static FORKED_FROM_ID_FINDER: LazyLock<Finder<'static>> =
     LazyLock::new(|| Finder::new(b"forked_from_id"));
-static INTER_AGENT_COMMUNICATION_METADATA_FINDER: LazyLock<Finder<'static>> =
-    LazyLock::new(|| Finder::new(b"inter_agent_communication_metadata"));
+static INTER_AGENT_COMMUNICATION_FINDER: LazyLock<Finder<'static>> =
+    LazyLock::new(|| Finder::new(b"inter_agent_communication"));
 static TASK_STARTED_FINDER: LazyLock<Finder<'static>> =
     LazyLock::new(|| Finder::new(b"task_started"));
 
@@ -78,102 +78,32 @@ enum CodexReplayMode {
     TimestampSecond([u8; 19]),
 }
 
+// The replay boundary is chosen from what a rollout actually contains, never
+// from `session_meta` metadata: resuming a session re-records the *original*
+// session's `cli_version`, so version gating misattributes resumed rollouts.
 fn codex_replay_mode(path: &Path) -> Option<CodexReplayMode> {
-    if is_current_codex_subagent_session(path) {
-        return Some(CodexReplayMode::UntilSubagentTurn);
+    if !is_codex_replay_session(path) {
+        return None;
     }
-    is_codex_replay_session(path)
-        .then(|| detect_replay_second(path))
-        .flatten()
-        .map(CodexReplayMode::TimestampSecond)
-}
-
-fn is_current_codex_subagent_session(path: &Path) -> bool {
-    let Ok(file) = fs::File::open(path) else {
-        return false;
-    };
-    let mut reader = BufReader::new(file);
-    let mut line = Vec::new();
-    let Ok(n) = reader.read_until(b'\n', &mut line) else {
-        return false;
-    };
-    if n == 0 {
-        return false;
-    }
-    let Ok(value) = serde_json::from_slice::<CodexSessionLogEntry<'_>>(&line) else {
-        return false;
-    };
-    value.entry_type.as_deref() == Some("session_meta")
-        && THREAD_SPAWN_FINDER.find(&line).is_some()
-        && value.payload.as_ref().is_some_and(|payload| {
-            payload.thread_source.as_deref() == Some("subagent")
-                && payload.multi_agent_version.as_deref() == Some("v2")
-                && payload
-                    .cli_version
-                    .as_deref()
-                    .is_some_and(codex_cli_uses_subagent_turn_marker)
-        })
-}
-
-fn codex_cli_uses_subagent_turn_marker(version: &str) -> bool {
-    let version = version
-        .strip_prefix("rust-v")
-        .or_else(|| version.strip_prefix('v'))
-        .unwrap_or(version);
-    let version = version
-        .split_once('+')
-        .map_or(version, |(version, _)| version);
-    let (core, prerelease) = version
-        .split_once('-')
-        .map_or((version, None), |(core, prerelease)| {
-            (core, Some(prerelease))
-        });
-    let mut components = core.split('.');
-    let Some(major) = components.next().and_then(|part| part.parse::<u64>().ok()) else {
-        return false;
-    };
-    let Some(minor) = components.next().and_then(|part| part.parse::<u64>().ok()) else {
-        return false;
-    };
-    let Some(patch) = components.next().and_then(|part| part.parse::<u64>().ok()) else {
-        return false;
-    };
-    if components.next().is_some() {
-        return false;
-    }
-    match (major, minor, patch).cmp(&(0, 143, 0)) {
-        std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Greater => true,
-        std::cmp::Ordering::Equal => match prerelease {
-            None => true,
-            Some(prerelease) => {
-                prerelease
-                    .strip_prefix("alpha.")
-                    .and_then(|version| version.split('.').next())
-                    .and_then(|version| version.parse::<u64>().ok())
-                    .is_some_and(|version| version >= 15)
-                    || prerelease.starts_with("beta.")
-                    || prerelease.starts_with("rc.")
-            }
-        },
-    }
+    detect_replay_boundary(path)
 }
 
 fn is_codex_subagent_turn_start(line: &[u8]) -> bool {
-    if INTER_AGENT_COMMUNICATION_METADATA_FINDER
-        .find(line)
-        .is_none()
-    {
+    if INTER_AGENT_COMMUNICATION_FINDER.find(line).is_none() {
         return false;
     }
     serde_json::from_slice::<CodexSessionLogEntry<'_>>(line)
         .ok()
         .is_some_and(|value| {
-            value.entry_type.as_deref() == Some("inter_agent_communication_metadata")
-                && value
-                    .payload
-                    .as_ref()
-                    .is_some_and(|payload| payload.trigger_turn == Some(true))
+            // Renamed in Codex CLI 0.143.0-alpha.15; both spellings occur in
+            // rollouts that are still on disk.
+            matches!(
+                value.entry_type.as_deref(),
+                Some("inter_agent_communication" | "inter_agent_communication_metadata")
+            ) && value
+                .payload
+                .as_ref()
+                .is_some_and(|payload| payload.trigger_turn == Some(true))
         })
 }
 
@@ -203,21 +133,40 @@ fn is_codex_replay_session(path: &Path) -> bool {
     THREAD_SPAWN_FINDER.find(&buf[..n]).is_some() || FORKED_FROM_ID_FINDER.find(&buf[..n]).is_some()
 }
 
-fn detect_replay_second(path: &Path) -> Option<[u8; 19]> {
+/// Decides how a replay session's inherited prefix is skipped.
+///
+/// A rollout that records an explicit subagent turn-start marker uses that
+/// marker, because it delimits the prefix exactly even when the replay spans
+/// several seconds. Rollouts without a marker fall back to the older heuristic
+/// that treats a single repeated timestamp second as the replayed prefix.
+///
+/// Returning `UntilSubagentTurn` only after the marker has actually been seen
+/// keeps a missing or renamed marker from silently discarding a whole rollout.
+fn detect_replay_boundary(path: &Path) -> Option<CodexReplayMode> {
     let Ok(file) = fs::File::open(path) else {
         return None;
     };
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     let mut first_second: Option<[u8; 19]> = None;
+    // Result of the fallback heuristic, settled by the first two usage events.
+    // Scanning continues past it so that a later marker still wins.
+    let mut replay_second: Option<[u8; 19]> = None;
+    let mut second_decided = false;
 
     loop {
         line.clear();
         let Ok(n) = reader.read_until(b'\n', &mut line) else {
-            return None;
+            break;
         };
         if n == 0 {
             break;
+        }
+        if is_codex_subagent_turn_start(&line) {
+            return Some(CodexReplayMode::UntilSubagentTurn);
+        }
+        if second_decided {
+            continue;
         }
         let Some(kind) = codex_line_usage_kind(&line) else {
             continue;
@@ -247,20 +196,26 @@ fn detect_replay_second(path: &Path) -> Option<[u8; 19]> {
             continue;
         };
         let ts_bytes = ts.as_bytes();
-        let ts_second: [u8; 19] = ts_bytes.get(0..19).and_then(|s| s.try_into().ok())?;
+        let Some(ts_second) = ts_bytes
+            .get(0..19)
+            .and_then(|second| <[u8; 19]>::try_from(second).ok())
+        else {
+            second_decided = true;
+            continue;
+        };
         match first_second {
             None => {
                 first_second = Some(ts_second);
             }
-            Some(ref first) => {
-                if first == &ts_second {
-                    return Some(ts_second);
+            Some(first) => {
+                if first == ts_second {
+                    replay_second = Some(ts_second);
                 }
-                return None;
+                second_decided = true;
             }
         }
     }
-    None
+    replay_second.map(CodexReplayMode::TimestampSecond)
 }
 
 pub(super) fn visit_codex_session_file(
@@ -1231,22 +1186,26 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_codex_versions_with_subagent_turn_markers() {
-        for (version, expected) in [
-            ("0.142.0", false),
-            ("0.143.0-alpha.14", false),
-            ("0.143.0-alpha.15", true),
-            ("0.143.0-beta.1", true),
-            ("0.143.0", true),
-            ("0.144.1", true),
-            ("rust-v0.143.0-alpha.15", true),
-            ("not-a-version", false),
+    fn recognizes_both_subagent_turn_start_spellings() {
+        for line in [
+            br#"{"type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}"#
+                .as_slice(),
+            br#"{"type":"inter_agent_communication","payload":{"recipient":"/root","trigger_turn":true}}"#
+                .as_slice(),
         ] {
-            assert_eq!(
-                codex_cli_uses_subagent_turn_marker(version),
-                expected,
-                "unexpected marker support for {version}"
-            );
+            assert!(is_codex_subagent_turn_start(line));
+        }
+    }
+
+    #[test]
+    fn rejects_non_triggering_inter_agent_communication() {
+        for line in [
+            br#"{"type":"inter_agent_communication_metadata","payload":{"trigger_turn":false}}"#
+                .as_slice(),
+            br#"{"type":"inter_agent_communication","payload":{"recipient":"/root"}}"#.as_slice(),
+            br#"{"type":"event_msg","payload":{"type":"task_started"}}"#.as_slice(),
+        ] {
+            assert!(!is_codex_subagent_turn_start(line));
         }
     }
 
