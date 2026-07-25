@@ -213,6 +213,11 @@ impl FastMultiplierOverrides {
         if let Some(multiplier) = self.exact.get(model) {
             return Some(*multiplier);
         }
+        // A default family alias bills at the variant it points to, so it
+        // shares that variant's Fast multiplier.
+        if let Some(multiplier) = pricing_alias(model).and_then(|alias| self.exact.get(alias)) {
+            return Some(*multiplier);
+        }
         let normalized = model.replace(['.', '@'], "-");
         normalized.split(['/', ':']).find_map(|part| {
             self.normalized_prefix
@@ -1337,6 +1342,11 @@ fn builtin_long_context_rates(base_model: &str) -> Option<LongContextRates> {
             cache_read,
         }
     };
+    // A default family alias bills at the variant it points to, so it must pick
+    // up that variant's tier rates. Upstream pricing data publishes the alias as
+    // its own entry without long-context rates, which would otherwise leave the
+    // alias on flat pricing.
+    let base_model = pricing_alias(base_model).unwrap_or(base_model);
     match base_model {
         "gpt-5.6-sol" => Some(openai(10e-6, 45e-6, Some(12.5e-6), Some(1e-6))),
         "gpt-5.6-terra" => Some(openai(5e-6, 22.5e-6, Some(6.25e-6), Some(0.5e-6))),
@@ -1360,9 +1370,7 @@ fn builtin_long_context_rates(base_model: &str) -> Option<LongContextRates> {
 /// `Pricing::long_context_threshold`, and falls back to the default 200K
 /// boundary used for LiteLLM `*_above_200k_tokens` data.
 pub(crate) fn long_context_split_threshold(model: &str) -> u64 {
-    let base_model = model_without_date_suffix(model);
-    let canonical_model = pricing_alias(base_model).unwrap_or(base_model);
-    builtin_long_context_rates(canonical_model)
+    builtin_long_context_rates(model_without_date_suffix(model))
         .map(|rates| rates.threshold)
         .unwrap_or(DEFAULT_LONG_CONTEXT_THRESHOLD_TOKENS)
 }
