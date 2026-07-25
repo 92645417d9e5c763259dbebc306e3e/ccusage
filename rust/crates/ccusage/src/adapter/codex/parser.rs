@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     fs,
-    io::{BufRead, BufReader, Read},
+    io::{BufRead, BufReader},
     path::Path,
     sync::LazyLock,
 };
@@ -36,15 +36,6 @@ static INPUT_TOKENS_FIELD_FINDER: LazyLock<Finder<'static>> =
     LazyLock::new(|| Finder::new(br#""input_tokens":"#));
 static PROMPT_TOKENS_FIELD_FINDER: LazyLock<Finder<'static>> =
     LazyLock::new(|| Finder::new(br#""prompt_tokens":"#));
-static THREAD_SPAWN_FINDER: LazyLock<Finder<'static>> =
-    LazyLock::new(|| Finder::new(b"thread_spawn"));
-static FORKED_FROM_ID_FINDER: LazyLock<Finder<'static>> =
-    LazyLock::new(|| Finder::new(b"forked_from_id"));
-static INTER_AGENT_COMMUNICATION_FINDER: LazyLock<Finder<'static>> =
-    LazyLock::new(|| Finder::new(b"inter_agent_communication"));
-static TASK_STARTED_FINDER: LazyLock<Finder<'static>> =
-    LazyLock::new(|| Finder::new(b"task_started"));
-
 const CODEX_AUTO_REVIEW_MODEL: &str = "codex-auto-review";
 const CODEX_AUTO_REVIEW_FALLBACKS_JSON: &str = include_str!("codex-auto-review-fallbacks.json");
 
@@ -72,158 +63,82 @@ struct CodexExecTimestamps {
     model: String,
 }
 
-#[derive(Clone, Copy)]
-enum CodexReplayMode {
-    UntilSubagentTurn,
-    TimestampSecond([u8; 19]),
+/// Tracks how far a forked session's leading events still match the history it
+/// replayed from its parent.
+enum CodexReplayState<'a> {
+    /// Comparing the child's leading usage against the parent's usage prefix.
+    MatchingParent {
+        prefix: &'a [CodexRawUsage],
+        index: usize,
+    },
+    /// The parent stream could not anchor the replay, so skip the leading burst
+    /// that Codex rewrote into a single second.
+    SkippingSecond([u8; 19]),
+    /// Past the replayed history: every remaining event is the child's own usage.
+    Done,
 }
 
-// The replay boundary is chosen from what a rollout actually contains, never
-// from `session_meta` metadata: resuming a session re-records the *original*
-// session's `cli_version`, so version gating misattributes resumed rollouts.
-fn codex_replay_mode(path: &Path) -> Option<CodexReplayMode> {
-    if !is_codex_replay_session(path) {
-        return None;
-    }
-    detect_replay_boundary(path)
-}
-
-fn is_codex_subagent_turn_start(line: &[u8]) -> bool {
-    if INTER_AGENT_COMMUNICATION_FINDER.find(line).is_none() {
-        return false;
-    }
-    serde_json::from_slice::<CodexSessionLogEntry<'_>>(line)
-        .ok()
-        .is_some_and(|value| {
-            // Renamed in Codex CLI 0.143.0-alpha.15; both spellings occur in
-            // rollouts that are still on disk.
-            matches!(
-                value.entry_type.as_deref(),
-                Some("inter_agent_communication" | "inter_agent_communication_metadata")
-            ) && value
-                .payload
-                .as_ref()
-                .is_some_and(|payload| payload.trigger_turn == Some(true))
-        })
-}
-
-fn is_codex_task_started(line: &[u8]) -> bool {
-    if TASK_STARTED_FINDER.find(line).is_none() {
-        return false;
-    }
-    serde_json::from_slice::<CodexSessionLogEntry<'_>>(line)
-        .ok()
-        .is_some_and(|value| {
-            value.entry_type.as_deref() == Some("event_msg")
-                && value
-                    .payload
-                    .as_ref()
-                    .is_some_and(|payload| payload.payload_type.as_deref() == Some("task_started"))
-        })
-}
-
-fn is_codex_replay_session(path: &Path) -> bool {
-    let Ok(mut file) = fs::File::open(path) else {
-        return false;
-    };
-    let mut buf = [0u8; 16 * 1024];
-    let Ok(n) = file.read(&mut buf) else {
-        return false;
-    };
-    THREAD_SPAWN_FINDER.find(&buf[..n]).is_some() || FORKED_FROM_ID_FINDER.find(&buf[..n]).is_some()
-}
-
-/// Decides how a replay session's inherited prefix is skipped.
-///
-/// A rollout that records an explicit subagent turn-start marker uses that
-/// marker, because it delimits the prefix exactly even when the replay spans
-/// several seconds. Rollouts without a marker fall back to the older heuristic
-/// that treats a single repeated timestamp second as the replayed prefix.
-///
-/// Returning `UntilSubagentTurn` only after the marker has actually been seen
-/// keeps a missing or renamed marker from silently discarding a whole rollout.
-fn detect_replay_boundary(path: &Path) -> Option<CodexReplayMode> {
+fn detect_replay_second(path: &Path) -> Option<[u8; 19]> {
     let Ok(file) = fs::File::open(path) else {
         return None;
     };
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     let mut first_second: Option<[u8; 19]> = None;
-    // Result of the fallback heuristic, settled by the first two usage events.
-    // Scanning continues past it so that a later marker still wins.
-    let mut replay_second: Option<[u8; 19]> = None;
-    let mut second_decided = false;
 
     loop {
         line.clear();
-        let Ok(n) = reader.read_until(b'\n', &mut line) else {
-            break;
+        let Ok(bytes_read) = reader.read_until(b'\n', &mut line) else {
+            return None;
         };
-        if n == 0 {
-            break;
+        if bytes_read == 0 {
+            return None;
         }
-        if is_codex_subagent_turn_start(&line) {
-            return Some(CodexReplayMode::UntilSubagentTurn);
-        }
-        if second_decided {
-            continue;
-        }
-        let Some(kind) = codex_line_usage_kind(&line) else {
+        let Some(CodexLineKind::Session) = codex_line_usage_kind(&line) else {
             continue;
         };
-        if !matches!(kind, CodexLineKind::Session) {
-            continue;
-        }
         let Ok(value) = serde_json::from_slice::<CodexSessionLogEntry<'_>>(&line) else {
             continue;
         };
-        if value.entry_type.as_deref() != Some("event_msg") {
-            continue;
-        }
-        let Some(payload) = value.payload.as_ref() else {
-            continue;
-        };
-        if payload.payload_type.as_deref() != Some("token_count") {
-            continue;
-        }
-        let info = payload.info.as_ref();
-        if info.and_then(|i| i.last_token_usage.as_ref()).is_none()
-            && info.and_then(|i| i.total_token_usage.as_ref()).is_none()
+        let info = value.payload.as_ref().and_then(|payload| {
+            (value.entry_type.as_deref() == Some("event_msg")
+                && payload.payload_type.as_deref() == Some("token_count"))
+            .then_some(payload.info.as_ref())
+            .flatten()
+        });
+        if info
+            .is_none_or(|info| info.last_token_usage.is_none() && info.total_token_usage.is_none())
         {
             continue;
         }
-        let Some(ts) = codex_session_timestamp(value.timestamp.as_ref()) else {
+        let Some(timestamp) = codex_session_timestamp(value.timestamp.as_ref()) else {
             continue;
         };
-        let ts_bytes = ts.as_bytes();
-        let Some(ts_second) = ts_bytes
-            .get(0..19)
-            .and_then(|second| <[u8; 19]>::try_from(second).ok())
+        let Some(second) = timestamp
+            .as_bytes()
+            .get(..19)
+            .and_then(|second| second.try_into().ok())
         else {
-            second_decided = true;
             continue;
         };
         match first_second {
-            None => {
-                first_second = Some(ts_second);
-            }
-            Some(first) => {
-                if first == ts_second {
-                    replay_second = Some(ts_second);
-                }
-                second_decided = true;
-            }
+            None => first_second = Some(second),
+            Some(first) => return (first == second).then_some(first),
         }
     }
-    replay_second.map(CodexReplayMode::TimestampSecond)
 }
 
+/// Visits every usage event in a Codex session log.
+///
+/// `replayed_prefix` carries the usage a forked session copied from its parent so
+/// it is not counted twice: `None` for sessions that are not forks, and an empty
+/// slice for forks whose parent log is unavailable.
 pub(super) fn visit_codex_session_file(
     sessions_dir: &Path,
     path: &Path,
+    replayed_prefix: Option<&[CodexRawUsage]>,
     mut visit: impl FnMut(CodexTokenUsageEvent) -> Result<()>,
 ) -> Result<()> {
-    let replay_mode = codex_replay_mode(path);
     let Ok(file) = fs::File::open(path) else {
         return Ok(());
     };
@@ -235,8 +150,48 @@ pub(super) fn visit_codex_session_file(
     let mut current_model_is_fallback = false;
     let mut current_service_tier = None;
     let fallback_timestamp = file_modified_timestamp(path);
-    let mut skip_replay = replay_mode.is_some();
-    let mut pending_subagent_events = Vec::new();
+    let mut replay = match replayed_prefix {
+        Some(prefix) => CodexReplayState::MatchingParent { prefix, index: 0 },
+        None => CodexReplayState::Done,
+    };
+    let mut visit_filtered = |event: CodexTokenUsageEvent| {
+        // Each arm either returns or advances the state toward `Done`, so this
+        // loop only re-runs to apply the event to the state it switched to.
+        loop {
+            match replay {
+                CodexReplayState::MatchingParent { prefix, index } => {
+                    let usage = CodexRawUsage {
+                        input_tokens: event.input_tokens,
+                        cached_input_tokens: event.cached_input_tokens,
+                        output_tokens: event.output_tokens,
+                        reasoning_output_tokens: event.reasoning_output_tokens,
+                        total_tokens: event.total_tokens,
+                    };
+                    if prefix.get(index) == Some(&usage) {
+                        replay = CodexReplayState::MatchingParent {
+                            prefix,
+                            index: index + 1,
+                        };
+                        return Ok(());
+                    }
+                    // Nothing matched, so the parent stream cannot anchor this
+                    // replay: the log is unavailable, or Codex rewrote the copied
+                    // history. Fall back to the same-second burst instead.
+                    replay = (index == 0)
+                        .then(|| detect_replay_second(path))
+                        .flatten()
+                        .map_or(CodexReplayState::Done, CodexReplayState::SkippingSecond);
+                }
+                CodexReplayState::SkippingSecond(second) => {
+                    if event.timestamp.as_bytes().get(..19) == Some(second.as_slice()) {
+                        return Ok(());
+                    }
+                    replay = CodexReplayState::Done;
+                }
+                CodexReplayState::Done => return visit(event),
+            }
+        }
+    };
 
     loop {
         line.clear();
@@ -246,24 +201,6 @@ pub(super) fn visit_codex_session_file(
         if bytes_read == 0 {
             break;
         }
-        if skip_replay
-            && matches!(replay_mode, Some(CodexReplayMode::UntilSubagentTurn))
-            && is_codex_task_started(&line)
-        {
-            pending_subagent_events.clear();
-            current_service_tier = None;
-            continue;
-        }
-        if skip_replay
-            && matches!(replay_mode, Some(CodexReplayMode::UntilSubagentTurn))
-            && is_codex_subagent_turn_start(&line)
-        {
-            skip_replay = false;
-            for event in pending_subagent_events.drain(..) {
-                visit(event)?;
-            }
-            continue;
-        }
         let Some(line_kind) = codex_line_usage_kind(&line) else {
             continue;
         };
@@ -272,55 +209,6 @@ pub(super) fn visit_codex_session_file(
                 let Ok(value) = serde_json::from_slice::<CodexSessionLogEntry<'_>>(&line) else {
                     continue;
                 };
-                if skip_replay
-                    && value.entry_type.as_deref() == Some("event_msg")
-                    && value
-                        .payload
-                        .as_ref()
-                        .is_some_and(|p| p.payload_type.as_deref() == Some("token_count"))
-                {
-                    let should_skip = match replay_mode {
-                        Some(CodexReplayMode::UntilSubagentTurn) => true,
-                        Some(CodexReplayMode::TimestampSecond(replay_second)) => {
-                            let Some(ts) = codex_session_timestamp(value.timestamp.as_ref()) else {
-                                continue;
-                            };
-                            ts.as_bytes().get(0..19).is_some_and(|second| {
-                                second.len() == 19 && second == replay_second.as_slice()
-                            })
-                        }
-                        None => false,
-                    };
-                    if should_skip {
-                        if matches!(replay_mode, Some(CodexReplayMode::UntilSubagentTurn)) {
-                            let mut buffer_event = |event| {
-                                pending_subagent_events.push(event);
-                                Ok(())
-                            };
-                            visit_codex_session_entry(
-                                &session_id,
-                                value,
-                                &mut previous_totals,
-                                &mut current_model,
-                                &mut current_model_is_fallback,
-                                &mut current_service_tier,
-                                &mut buffer_event,
-                            )?;
-                        } else if let Some(total_usage) = value
-                            .payload
-                            .as_ref()
-                            .and_then(|payload| payload.info.as_ref())
-                            .and_then(|info| info.total_token_usage.as_ref())
-                            .copied()
-                        {
-                            previous_totals.replace(total_usage);
-                        }
-                        continue;
-                    }
-                    if matches!(replay_mode, Some(CodexReplayMode::TimestampSecond(_))) {
-                        skip_replay = false;
-                    }
-                }
                 visit_codex_session_entry(
                     &session_id,
                     value,
@@ -328,7 +216,7 @@ pub(super) fn visit_codex_session_file(
                     &mut current_model,
                     &mut current_model_is_fallback,
                     &mut current_service_tier,
-                    &mut visit,
+                    &mut visit_filtered,
                 )?;
             }
             CodexLineKind::Headless => {
@@ -339,7 +227,7 @@ pub(super) fn visit_codex_session_file(
                         &fallback_timestamp,
                         &mut current_model,
                         &mut current_model_is_fallback,
-                        &mut visit,
+                        &mut visit_filtered,
                     )?;
                 } else {
                     add_codex_exec_event_from_value(
@@ -348,7 +236,7 @@ pub(super) fn visit_codex_session_file(
                         &fallback_timestamp,
                         &mut current_model,
                         &mut current_model_is_fallback,
-                        &mut visit,
+                        &mut visit_filtered,
                     )?;
                 };
             }
@@ -404,20 +292,17 @@ fn visit_codex_session_entry(
     }
     let info = payload.info.as_ref();
     let total_usage = info.and_then(|info| info.total_token_usage.as_ref().copied());
-    let totals_unchanged = total_usage
+    let cumulative_advanced = total_usage
         .as_ref()
-        .zip(previous_totals.as_ref())
-        .is_some_and(|(current, previous)| current == previous);
-    let raw_usage = if totals_unchanged {
-        None
-    } else {
-        info.and_then(|info| info.last_token_usage.as_ref().copied())
-            .or_else(|| {
-                total_usage
-                    .as_ref()
-                    .map(|usage| subtract_codex_raw_usage(usage, previous_totals.as_ref()))
-            })
-    };
+        .is_none_or(|total_usage| previous_totals.as_ref() != Some(total_usage));
+    let raw_usage = info
+        .and_then(|info| info.last_token_usage.as_ref().copied())
+        .filter(|_| cumulative_advanced)
+        .or_else(|| {
+            total_usage
+                .as_ref()
+                .map(|usage| subtract_codex_raw_usage(usage, previous_totals.as_ref()))
+        });
     if let Some(total_usage) = total_usage {
         *previous_totals = Some(total_usage);
     }
@@ -1081,6 +966,14 @@ fn raw_or_normalized_value_timestamp(value: Option<&Value>) -> Option<String> {
     normalize_value_timestamp(Some(value))
 }
 
+/// Reads a Codex timestamp field that can hold an RFC3339 string or an epoch
+/// number, using the same normalization as session events.
+pub(super) fn codex_value_timestamp(value: Option<&Value>) -> Option<TimestampMs> {
+    normalize_value_timestamp(value)
+        .as_deref()
+        .and_then(crate::parse_ts_timestamp)
+}
+
 fn normalize_value_timestamp(value: Option<&Value>) -> Option<String> {
     let value = value?;
     if let Some(text) = value.as_str() {
@@ -1182,30 +1075,6 @@ mod tests {
                 expected,
                 "unexpected tier for {value:?}"
             );
-        }
-    }
-
-    #[test]
-    fn recognizes_both_subagent_turn_start_spellings() {
-        for line in [
-            br#"{"type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}"#
-                .as_slice(),
-            br#"{"type":"inter_agent_communication","payload":{"recipient":"/root","trigger_turn":true}}"#
-                .as_slice(),
-        ] {
-            assert!(is_codex_subagent_turn_start(line));
-        }
-    }
-
-    #[test]
-    fn rejects_non_triggering_inter_agent_communication() {
-        for line in [
-            br#"{"type":"inter_agent_communication_metadata","payload":{"trigger_turn":false}}"#
-                .as_slice(),
-            br#"{"type":"inter_agent_communication","payload":{"recipient":"/root"}}"#.as_slice(),
-            br#"{"type":"event_msg","payload":{"type":"task_started"}}"#.as_slice(),
-        ] {
-            assert!(!is_codex_subagent_turn_start(line));
         }
     }
 
