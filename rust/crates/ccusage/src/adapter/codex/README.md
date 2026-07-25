@@ -23,7 +23,7 @@ Relevant speed-setting event in Codex CLI 0.144.0 and later:
 - `type === "event_msg"`
 - `payload.type === "thread_settings_applied"`
 - `payload.thread_settings.service_tier === "priority"` (or legacy `"fast"`) selects Fast.
-- `payload.thread_settings.service_tier === "default"` selects Standard.
+- `payload.thread_settings.service_tier === "default"` selects Standard. Codex Desktop spells the same tier `"standard"`; both appear in the same CLI version, so this is a value mapping and not a version split.
 - Token usage inherits the latest recognized setting in the rollout. Missing or unsupported settings remain unclassified so report policy can apply its documented fallback.
 
 Token mapping:

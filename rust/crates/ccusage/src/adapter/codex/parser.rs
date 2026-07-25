@@ -584,7 +584,10 @@ fn visit_codex_exec_usage_event(
 
 fn codex_service_tier(value: &str) -> Option<CodexServiceTier> {
     match value {
-        "default" => Some(CodexServiceTier::Standard),
+        // Both spellings mean non-priority pricing and occur in the same Codex
+        // version on the same day; which one is written depends on the client
+        // (Codex Desktop writes "standard"), not on the CLI version.
+        "default" | "standard" => Some(CodexServiceTier::Standard),
         "fast" | "priority" => Some(CodexServiceTier::Fast),
         _ => None,
     }
@@ -1201,6 +1204,24 @@ fn subtract_codex_raw_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_recorded_service_tier_spellings() {
+        for (value, expected) in [
+            ("standard", Some(CodexServiceTier::Standard)),
+            ("default", Some(CodexServiceTier::Standard)),
+            ("priority", Some(CodexServiceTier::Fast)),
+            ("fast", Some(CodexServiceTier::Fast)),
+            ("flex", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                codex_service_tier(value),
+                expected,
+                "unexpected tier for {value:?}"
+            );
+        }
+    }
 
     #[test]
     fn recognizes_codex_versions_with_subagent_turn_markers() {
