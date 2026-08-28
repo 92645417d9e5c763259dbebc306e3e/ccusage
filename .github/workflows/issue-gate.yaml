@@ -318,14 +318,21 @@ jobs:
                   error make {msg: 'Pullfrog checked out a commit outside the implementation base history'}
               }
               let tracked_tree_is_clean = git-complete [diff --quiet $env.BASE_SHA $checked_out_head --]
-              if $tracked_tree_is_clean.exit_code != 0 {
+              if $tracked_tree_is_clean.exit_code == 1 {
                   error make {msg: 'Pullfrog declined implementation after changing tracked files'}
+              }
+              if $tracked_tree_is_clean.exit_code != 0 {
+                  error make {msg: $"Could not compare the tracked tree: ($tracked_tree_is_clean.stderr | str trim)"}
               }
               let status = git-complete [status --porcelain]
               if $status.exit_code != 0 or ($status.stdout | str trim | is-not-empty) {
                   error make {msg: 'Pullfrog declined implementation after changing the working tree'}
               }
-              git-run [checkout --detach $env.BASE_SHA]
+              git-run ['-c' core.hooksPath=/dev/null checkout --detach $env.BASE_SHA]
+              let restored_head = git-complete [rev-parse HEAD]
+              if $restored_head.exit_code != 0 or ($restored_head.stdout | str trim) != $env.BASE_SHA {
+                  error make {msg: 'Could not restore the checked-out base commit'}
+              }
           } else if $result.implementation == 'prepared' {
               let head = git-complete [rev-parse HEAD]
               if $head.exit_code != 0 or ($head.stdout | str trim) != $env.BASE_SHA {
