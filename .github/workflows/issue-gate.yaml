@@ -285,7 +285,14 @@ jobs:
           IMPLEMENTATION_METADATA: ${{ runner.temp }}/implementation.json
         run: |
           def git-complete [args: list<string>]: nothing -> record {
-              run-external git ...$args | complete
+              let safety_config = [
+                  '-c' core.hooksPath=/dev/null
+                  '-c' core.fsmonitor=false
+                  '-c' core.untrackedCache=false
+                  '-c' diff.external=
+                  '-c' diff.trustExitCode=false
+              ]
+              run-external git ...$safety_config ...$args | complete
           }
 
           def git-run [args: list<string>]: nothing -> nothing {
@@ -317,18 +324,18 @@ jobs:
               if $base_is_ancestor.exit_code != 0 {
                   error make {msg: 'Pullfrog checked out a commit outside the implementation base history'}
               }
-              let tracked_tree_is_clean = git-complete [diff --quiet $env.BASE_SHA $checked_out_head --]
+              let tracked_tree_is_clean = git-complete [diff --no-ext-diff --no-textconv --quiet $env.BASE_SHA $checked_out_head --]
               if $tracked_tree_is_clean.exit_code == 1 {
                   error make {msg: 'Pullfrog declined implementation after changing tracked files'}
               }
               if $tracked_tree_is_clean.exit_code != 0 {
                   error make {msg: $"Could not compare the tracked tree: ($tracked_tree_is_clean.stderr | str trim)"}
               }
-              let status = git-complete [status --porcelain]
+              let status = git-complete [status --porcelain --untracked-files=all]
               if $status.exit_code != 0 or ($status.stdout | str trim | is-not-empty) {
                   error make {msg: 'Pullfrog declined implementation after changing the working tree'}
               }
-              git-run ['-c' core.hooksPath=/dev/null checkout --detach $env.BASE_SHA]
+              git-run [checkout --detach $env.BASE_SHA]
               let restored_head = git-complete [rev-parse HEAD]
               if $restored_head.exit_code != 0 or ($restored_head.stdout | str trim) != $env.BASE_SHA {
                   error make {msg: 'Could not restore the checked-out base commit'}
@@ -359,7 +366,7 @@ jobs:
                   git-run [add --intent-to-add -- ...$untracked]
               }
 
-              let changed_paths_result = git-complete [diff --name-only '-z' HEAD --]
+              let changed_paths_result = git-complete [diff --no-ext-diff --no-textconv --name-only '-z' HEAD --]
               if $changed_paths_result.exit_code != 0 {
                   error make {msg: $"Could not inspect changed paths: ($changed_paths_result.stderr | str trim)"}
               }
@@ -368,16 +375,16 @@ jobs:
                   error make {msg: 'Pullfrog implementation must change between 1 and 100 files'}
               }
 
-              let changed = git-complete [diff --quiet HEAD --]
+              let changed = git-complete [diff --no-ext-diff --no-textconv --quiet HEAD --]
               if $changed.exit_code == 0 {
                   error make {msg: 'Pullfrog reported a prepared implementation without any changes'}
               }
               if $changed.exit_code != 1 {
                   error make {msg: $"Could not inspect implementation changes: ($changed.stderr | str trim)"}
               }
-              git-run [diff --check HEAD --]
+              git-run [diff --no-ext-diff --no-textconv --check HEAD --]
 
-              let patch = git-complete [diff --binary --full-index HEAD --]
+              let patch = git-complete [diff --no-ext-diff --no-textconv --binary --full-index HEAD --]
               if $patch.exit_code != 0 {
                   error make {msg: $"Could not create the implementation patch: ($patch.stderr | str trim)"}
               }
