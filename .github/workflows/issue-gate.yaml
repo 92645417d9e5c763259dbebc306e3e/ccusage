@@ -210,11 +210,21 @@ jobs:
         id: base
         shell: nu {0}
         run: |
-          let result = run-external git rev-parse HEAD | complete
+          let result = do { run-external git rev-parse HEAD } | complete
           if $result.exit_code != 0 {
               error make {msg: $"Could not resolve the implementation base: ($result.stderr | str trim)"}
           }
-          $"base_sha=($result.stdout | str trim)\n" | save --append $env.GITHUB_OUTPUT
+          let common_dir = do { run-external git rev-parse '--path-format=absolute' '--git-common-dir' } | complete
+          if $common_dir.exit_code != 0 {
+              error make {msg: $"Could not resolve the implementation Git directory: ($common_dir.stderr | str trim)"}
+          }
+          [
+              $"base_sha=($result.stdout | str trim)"
+              $"common_git_dir=($common_dir.stdout | str trim)"
+          ]
+          | str join "\n"
+          | $in + "\n"
+          | save --append $env.GITHUB_OUTPUT
 
       - name: Guard the implementation request
         id: implementation_guard
@@ -283,20 +293,30 @@ jobs:
           BASE_SHA: ${{ steps.base.outputs.base_sha }}
           IMPLEMENTATION_PATCH: ${{ runner.temp }}/implementation.patch
           IMPLEMENTATION_METADATA: ${{ runner.temp }}/implementation.json
+          IMPLEMENTATION_GIT_COMMON_DIR: ${{ steps.base.outputs.common_git_dir }}
+          IMPLEMENTATION_WORKSPACE: ${{ github.workspace }}
+          SAFE_TEMP_ROOT: ${{ runner.temp }}
         run: |
-          def git-complete [args: list<string>]: nothing -> record {
-              let safety_config = [
-                  '-c' core.hooksPath=/dev/null
-                  '-c' core.fsmonitor=false
-                  '-c' core.untrackedCache=false
-                  '-c' diff.external=
-                  '-c' diff.trustExitCode=false
+          def safe-git [safe_git: string, safe_index: string, args: list<string>]: nothing -> record {
+              let objects = [$env.IMPLEMENTATION_GIT_COMMON_DIR 'objects'] | path join
+              let safe_environment = [
+                  '-i'
+                  'PATH=/usr/bin:/bin'
+                  $"HOME=($env.SAFE_TEMP_ROOT)"
+                  'LC_ALL=C'
+                  'GIT_CONFIG_NOSYSTEM=1'
+                  'GIT_CONFIG_GLOBAL=/dev/null'
+                  'GIT_ATTR_NOSYSTEM=1'
+                  $"GIT_DIR=($safe_git)"
+                  $"GIT_WORK_TREE=($env.IMPLEMENTATION_WORKSPACE)"
+                  $"GIT_INDEX_FILE=($safe_index)"
+                  $"GIT_ALTERNATE_OBJECT_DIRECTORIES=($objects)"
               ]
-              run-external git ...$safety_config ...$args | complete
+              do { run-external /usr/bin/env ...$safe_environment /usr/bin/git ...$args } | complete
           }
 
-          def git-run [args: list<string>]: nothing -> nothing {
-              let result = git-complete $args
+          def safe-git-run [safe_git: string, safe_index: string, args: list<string>]: nothing -> nothing {
+              let result = safe-git $safe_git $safe_index $args
               if $result.exit_code != 0 {
                   error make {
                       msg: $"git ($args | str join ' ') failed with exit code ($result.exit_code): ($result.stderr | str trim)"
@@ -314,37 +334,42 @@ jobs:
               error make {msg: 'Pullfrog returned unexpected implementation fields'}
           }
 
+          let safe_root_result = do {
+              run-external /usr/bin/mktemp '-d' $"($env.SAFE_TEMP_ROOT)/pullfrog-issue-gate.XXXXXX"
+          } | complete
+          if $safe_root_result.exit_code != 0 {
+              error make {msg: $"Could not create sterile Git metadata: ($safe_root_result.stderr | str trim)"}
+          }
+          let safe_root = $safe_root_result.stdout | str trim
+          let safe_git = [$safe_root 'git'] | path join
+          let safe_index = [$safe_root 'index'] | path join
+          let bootstrap_environment = [
+              '-i'
+              'PATH=/usr/bin:/bin'
+              $"HOME=($env.SAFE_TEMP_ROOT)"
+              'LC_ALL=C'
+              'GIT_CONFIG_NOSYSTEM=1'
+              'GIT_CONFIG_GLOBAL=/dev/null'
+          ]
+          let init = do {
+              run-external /usr/bin/env ...$bootstrap_environment /usr/bin/git init '--bare' '--quiet' $safe_git
+          } | complete
+          if $init.exit_code != 0 {
+              error make {msg: $"Could not initialize sterile Git metadata: ($init.stderr | str trim)"}
+          }
+          safe-git-run $safe_git $safe_index [update-ref HEAD $env.BASE_SHA]
+          safe-git-run $safe_git $safe_index [read-tree $env.BASE_SHA]
+          let status = safe-git $safe_git $safe_index [status '--porcelain=v1' '-z' '--untracked-files=all' '--ignored=traditional']
+          if $status.exit_code != 0 {
+              error make {msg: $"Could not inspect the implementation working tree: ($status.stderr | str trim)"}
+          }
+          let changes = $status.stdout | split row (char nul) | where {|entry| $entry | is-not-empty}
+
           if $result.implementation == 'none' {
-              let head = git-complete [rev-parse HEAD]
-              if $head.exit_code != 0 {
-                  error make {msg: 'Could not inspect the checked-out commit'}
-              }
-              let checked_out_head = $head.stdout | str trim
-              let base_is_ancestor = git-complete [merge-base --is-ancestor $env.BASE_SHA $checked_out_head]
-              if $base_is_ancestor.exit_code != 0 {
-                  error make {msg: 'Pullfrog checked out a commit outside the implementation base history'}
-              }
-              let tracked_tree_is_clean = git-complete [diff --no-ext-diff --no-textconv --quiet $env.BASE_SHA $checked_out_head --]
-              if $tracked_tree_is_clean.exit_code == 1 {
-                  error make {msg: 'Pullfrog declined implementation after changing tracked files'}
-              }
-              if $tracked_tree_is_clean.exit_code != 0 {
-                  error make {msg: $"Could not compare the tracked tree: ($tracked_tree_is_clean.stderr | str trim)"}
-              }
-              let status = git-complete [status --porcelain --untracked-files=all]
-              if $status.exit_code != 0 or ($status.stdout | str trim | is-not-empty) {
+              if ($changes | is-not-empty) {
                   error make {msg: 'Pullfrog declined implementation after changing the working tree'}
               }
-              git-run [checkout --detach $env.BASE_SHA]
-              let restored_head = git-complete [rev-parse HEAD]
-              if $restored_head.exit_code != 0 or ($restored_head.stdout | str trim) != $env.BASE_SHA {
-                  error make {msg: 'Could not restore the checked-out base commit'}
-              }
           } else if $result.implementation == 'prepared' {
-              let head = git-complete [rev-parse HEAD]
-              if $head.exit_code != 0 or ($head.stdout | str trim) != $env.BASE_SHA {
-                  error make {msg: 'Pullfrog must leave the checked-out base commit unchanged'}
-              }
               let metadata_is_valid = [
                   (($result.title | str trim | is-not-empty) and (($result.title | lines | length) == 1))
                   (($result.title | str length) <= 240)
@@ -354,37 +379,27 @@ jobs:
                   error make {msg: 'Pullfrog returned invalid implementation PR metadata'}
               }
 
-              let untracked_result = git-complete [ls-files --others --exclude-standard '-z']
-              if $untracked_result.exit_code != 0 {
-                  error make {msg: $"Could not inspect untracked files: ($untracked_result.stderr | str trim)"}
-              }
-              let untracked = $untracked_result.stdout | split row (char nul) | where {|path| $path | is-not-empty}
-              if ($untracked | length) > 100 {
-                  error make {msg: 'Pullfrog created too many untracked files for automatic publication'}
-              }
-              if ($untracked | is-not-empty) {
-                  git-run [add --intent-to-add -- ...$untracked]
-              }
-
-              let changed_paths_result = git-complete [diff --no-ext-diff --no-textconv --name-only '-z' HEAD --]
-              if $changed_paths_result.exit_code != 0 {
-                  error make {msg: $"Could not inspect changed paths: ($changed_paths_result.stderr | str trim)"}
-              }
-              let changed_paths = $changed_paths_result.stdout | split row (char nul) | where {|path| $path | is-not-empty}
+              let changed_paths = $changes | each {|entry| $entry | str substring 3..}
               if ($changed_paths | is-empty) or ($changed_paths | length) > 100 {
                   error make {msg: 'Pullfrog implementation must change between 1 and 100 files'}
               }
+              let untracked = $changes
+              | where {|entry| ($entry | str starts-with '?? ') or ($entry | str starts-with '!! ')}
+              | each {|entry| $entry | str substring 3..}
+              if ($untracked | is-not-empty) {
+                  safe-git-run $safe_git $safe_index [add '--intent-to-add' '--force' '--' ...$untracked]
+              }
 
-              let changed = git-complete [diff --no-ext-diff --no-textconv --quiet HEAD --]
+              let changed = safe-git $safe_git $safe_index [diff '--no-ext-diff' '--no-textconv' '--quiet' HEAD '--']
               if $changed.exit_code == 0 {
                   error make {msg: 'Pullfrog reported a prepared implementation without any changes'}
               }
               if $changed.exit_code != 1 {
                   error make {msg: $"Could not inspect implementation changes: ($changed.stderr | str trim)"}
               }
-              git-run [diff --no-ext-diff --no-textconv --check HEAD --]
+              safe-git-run $safe_git $safe_index [diff '--no-ext-diff' '--no-textconv' '--check' HEAD '--']
 
-              let patch = git-complete [diff --no-ext-diff --no-textconv --binary --full-index HEAD --]
+              let patch = safe-git $safe_git $safe_index [diff '--no-ext-diff' '--no-textconv' '--binary' '--full-index' HEAD '--']
               if $patch.exit_code != 0 {
                   error make {msg: $"Could not create the implementation patch: ($patch.stderr | str trim)"}
               }
