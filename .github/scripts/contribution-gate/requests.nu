@@ -731,8 +731,8 @@ export def publish-implementation []: nothing -> nothing {
     }
     let pull_number = $publication.pull_number
     let reconciliation = try {
-        let publication_state = implementation-publication-state $force_implementation
         let closing_pull_requests = closing-pull-requests $repo $issue.number
+        let publication_state = implementation-publication-state $force_implementation
         {
             blocked: $publication_state.blocked
             competing: (competing-closing-pull-request $closing_pull_requests $pull_number)
