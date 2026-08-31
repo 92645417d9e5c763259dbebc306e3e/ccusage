@@ -220,7 +220,15 @@ def close-issue [repo: string, number: int]: nothing -> bool {
         state: closed
         state_reason: not_planned
     } | ignore
-    true
+    sleep 2sec
+    let closed_issue = gh-api-json [$"repos/($repo)/issues/($number)"]
+    let protection = issue-protection-record $closed_issue
+    if $protection.protected_from_close {
+        restore-protected-issue
+        false
+    } else {
+        true
+    }
 }
 
 export def restore-protected-issue []: nothing -> nothing {
