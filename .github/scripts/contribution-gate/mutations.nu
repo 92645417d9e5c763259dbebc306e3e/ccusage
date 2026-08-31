@@ -250,7 +250,7 @@ export def restore-protected-issue []: nothing -> nothing {
     # GitHub cannot condition a close PATCH on labels, so this serialized label event repairs the final API race.
     gh-api-body PATCH $"repos/($repo)/issues/($number)" {state: open} | ignore
     ensure-gate-labels $repo
-    apply-triage-label $repo $number 'triage:needs-review' --preserve-protected
+    apply-triage-label $repo $number 'triage:needs-review'
     let body = comment-body $COMMENT_MARKER 'A trusted bug, security, or maintainer-review label was added during automatic closure. The issue was reopened for maintainer review.'
     upsert-comment $repo $number $body --require-open-issue
 }
@@ -367,7 +367,7 @@ export def issue-verdict []: nothing -> nothing {
                     $current_issue.implementation_blocked
             )
             apply-priority-label $repo $number $protected_verdict.priority
-            apply-triage-label $repo $number $protected_verdict.triage_label --preserve-protected
+            apply-triage-label $repo $number $protected_verdict.triage_label
             upsert-comment $repo $number (issue-comment $protected_verdict) --require-open-issue
             $protected_verdict
         }

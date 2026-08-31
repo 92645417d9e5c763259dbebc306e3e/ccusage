@@ -563,8 +563,7 @@ export def issue-implementation-guard []: nothing -> nothing {
     let issue = require-open-issue
     let force_implementation = (optional-env FORCE_IMPLEMENTATION 'false') == 'true'
     if (not $force_implementation) and $issue.implementation_blocked {
-        let body = comment-body $COMMENT_MARKER 'Automatic implementation was stopped because a trusted security or maintainer-review label requires explicit maintainer approval.'
-        upsert-comment $repo $issue.number $body --require-open-issue
+        print $"Skipping implementation because trusted labels require explicit maintainer approval for issue #($issue.number)."
         write-output skip 'true'
         return
     }
@@ -572,8 +571,7 @@ export def issue-implementation-guard []: nothing -> nothing {
     if $existing == null {
         let final_issue = require-open-issue
         if (not $force_implementation) and $final_issue.implementation_blocked {
-            let body = comment-body $COMMENT_MARKER 'Automatic implementation was stopped because a trusted security or maintainer-review label requires explicit maintainer approval.'
-            upsert-comment $repo $final_issue.number $body --require-open-issue
+            print $"Skipping implementation because trusted labels require explicit maintainer approval for issue #($final_issue.number)."
             write-output skip 'true'
             return
         }
@@ -592,9 +590,8 @@ def implementation-publication-state [force_implementation: bool]: nothing -> re
     }
 }
 
-def report-publication-blocked [repo: string, number: int]: nothing -> nothing {
-    let body = comment-body $COMMENT_MARKER 'Automatic implementation publication was stopped because a trusted security or maintainer-review label requires explicit maintainer approval.'
-    upsert-comment $repo $number $body --require-open-issue
+def report-publication-blocked [number: int]: nothing -> nothing {
+    print $"Skipping implementation publication because trusted labels require explicit maintainer approval for issue #($number)."
     write-output skip 'true'
 }
 
@@ -604,7 +601,7 @@ export def publish-implementation []: nothing -> nothing {
     let initial_state = implementation-publication-state $force_implementation
     let issue = $initial_state.issue
     if $initial_state.blocked {
-        report-publication-blocked $repo $issue.number
+        report-publication-blocked $issue.number
         return
     }
     let existing = existing-issue-pull-request $repo $issue.number
@@ -665,7 +662,7 @@ export def publish-implementation []: nothing -> nothing {
 
     let pre_push_state = implementation-publication-state $force_implementation
     if $pre_push_state.blocked {
-        report-publication-blocked $repo $issue.number
+        report-publication-blocked $issue.number
         return
     }
     git-run [push --set-upstream origin $"HEAD:refs/heads/($branch)"]
@@ -695,7 +692,7 @@ export def publish-implementation []: nothing -> nothing {
     )
     if $pre_create.blocked {
         git-run [push origin --delete $branch]
-        report-publication-blocked $repo $issue.number
+        report-publication-blocked $issue.number
         return
     }
     if $pre_create.existing != null {
@@ -726,7 +723,7 @@ export def publish-implementation []: nothing -> nothing {
     )
     if $publication.blocked {
         git-run [push origin --delete $branch]
-        report-publication-blocked $repo $issue.number
+        report-publication-blocked $issue.number
         return
     }
     let pull_number = $publication.pull_number
@@ -743,7 +740,7 @@ export def publish-implementation []: nothing -> nothing {
     }
     if $reconciliation.blocked {
         discard-created-pull-request $repo $pull_number $branch
-        report-publication-blocked $repo $issue.number
+        report-publication-blocked $issue.number
         return
     }
     let competing = $reconciliation.competing
