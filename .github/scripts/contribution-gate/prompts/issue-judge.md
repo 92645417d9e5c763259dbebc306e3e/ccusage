@@ -21,7 +21,7 @@ Do not infer acceptance from the issue author's request, implementation feasibil
 Choose exactly one priority: priority:critical, priority:high, priority:medium, or priority:low.
 Choose decision keep_open, close, or needs_human.
 
-- For a feature_request, choose close, priority:low, and implementation none. Explain politely why the optional capability is outside current core maintenance scope.
+- For a feature_request, choose close, priority:low, and implementation none only when close is allowed; otherwise choose needs_human. Explain politely why the optional capability is outside current core maintenance scope.
 - For supported_behavior_bug or security, never choose close. Choose keep_open when actionable, otherwise needs_human.
 - For maintenance or documentation, keep bounded work open and use needs_human when product scope is unclear.
 - For other, choose needs_human when closure appears appropriate. The deterministic gate does not allow model-directed closure of non-feature issues.

@@ -140,6 +140,9 @@ def test-prompt-rendering []: nothing -> nothing {
     expect 'keeps maintainer acceptance outside the model verdict' (
         $issue_prompt | str contains "Explicit maintainer acceptance is handled only by the workflow's manual implementation override"
     ) true
+    expect 'gives feature requests a safe fallback when closure is disabled' (
+        $issue_prompt | str contains 'only when close is allowed; otherwise choose needs_human'
+    ) true
     expect 'does not treat old triage labels as acceptance' (
         $issue_prompt | str contains 'labels such as triage:maintainable'
     ) true
@@ -684,6 +687,9 @@ def test-contribution-gate-comment []: nothing -> nothing {
     ) true
     expect 'does not invite an unaccepted core implementation PR' (
         $feature_comment | str contains 'Please do not open a core implementation PR unless a maintainer explicitly accepts this request.'
+    ) true
+    expect 'ends the feature comment with the normalized decision' (
+        $feature_comment | str trim | str ends-with 'Decision: **closed by the contribution gate**.'
     ) true
 }
 

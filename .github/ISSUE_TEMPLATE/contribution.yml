@@ -9,7 +9,7 @@ body:
         **Before you start:** Read [CONTRIBUTING.md](https://github.com/ccusage/ccusage/blob/main/CONTRIBUTING.md).
 
         New optional capabilities are closed by default unless a maintainer explicitly accepts the change
-        through the maintenance workflow. Being clear or easy to implement does not by itself make a
+        through the Issue Gate workflow. Being clear or easy to implement does not by itself make a
         proposal accepted scope.
 
         Use the bug report form when currently supported behavior is broken.

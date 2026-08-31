@@ -240,10 +240,8 @@ export def issue-comment [verdict: record]: nothing -> string {
     }
     comment-body $COMMENT_MARKER ((
         $details
-        | append [
-            ''
-            $"Decision: **($outcome)**."
-        ]
+        | append ''
+        | append $"Decision: **($outcome)**."
     ) | str join "\n")
 }
 
