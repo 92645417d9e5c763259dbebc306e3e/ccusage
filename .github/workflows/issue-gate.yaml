@@ -97,7 +97,7 @@ jobs:
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["decision", "priority", "implementation", "reason"],
+              "required": ["decision", "priority", "implementation", "issue_kind", "reason"],
               "properties": {
                 "decision": {
                   "type": "string",
@@ -110,6 +110,10 @@ jobs:
                 "implementation": {
                   "type": "string",
                   "enum": ["create_pr", "none"]
+                },
+                "issue_kind": {
+                  "type": "string",
+                  "enum": ["supported_behavior_bug", "security", "maintenance", "documentation", "feature_request", "other"]
                 },
                 "reason": {
                   "type": "string",

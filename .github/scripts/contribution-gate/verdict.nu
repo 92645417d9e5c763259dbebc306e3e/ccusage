@@ -1,5 +1,14 @@
 use ./core.nu [IMPLEMENTATION_PRIORITIES PRIORITY_LABELS]
 
+const ISSUE_KINDS = [
+    supported_behavior_bug
+    security
+    maintenance
+    documentation
+    feature_request
+    other
+]
+
 def parse-required-enum [verdict: record, field: string, allowed: list<string>]: nothing -> string {
     let value = $verdict | get --optional $field
     if ($value | describe) != 'string' or not ($value in $allowed) {
@@ -37,38 +46,62 @@ export def issue-verdict-record [result: string, close_allowed: bool, --force-im
     let decision = parse-required-enum $raw decision [keep_open close needs_human]
     let priority = parse-required-enum $raw priority $PRIORITY_LABELS
     let implementation = parse-required-enum $raw implementation [create_pr none]
+    let issue_kind = parse-required-enum $raw issue_kind $ISSUE_KINDS
     let reason = parse-reason $raw
     let verdict = {
         decision: $decision
         priority: $priority
         implementation: $implementation
+        issue_kind: $issue_kind
         reason: $reason
     }
 
-    # The workflow, rather than the model, owns the hard safety constraints for
-    # automatic closure and implementation.
-    let verdict = if not $close_allowed {
-        let verdict = if $verdict.decision == 'close' {
-            $verdict
-            | update decision needs_human
-            | update reason $"Automatic closure is disabled because author permissions could not be verified; maintainer review is required. ($verdict.reason)"
-        } else {
-            $verdict
-        }
-        $verdict | update implementation none
-    } else {
-        $verdict
-    }
-    if $force_implementation {
+    # Explicit maintainer action is the only path that bypasses automatic product scope.
+    let verdict = if $force_implementation {
         $verdict
         | update decision keep_open
         | update implementation create_pr
         | update reason $"A maintainer explicitly requested an implementation attempt. ($reason)"
-    } else if ($verdict.decision != 'keep_open') or (not ($verdict.priority in $IMPLEMENTATION_PRIORITIES)) {
-        $verdict | update implementation none
+    } else if $issue_kind == 'feature_request' {
+        $verdict
+        | update decision close
+        | update priority 'priority:low'
+        | update implementation none
+        | update reason $"This is a new optional capability rather than a bug or regression in currently supported behavior. ($reason)"
+    } else if $decision == 'close' {
+        $verdict
+        | update decision needs_human
+        | update implementation none
+        | update reason $"Only new feature requests may be closed automatically; maintainer review is required for this issue. ($reason)"
     } else {
         $verdict
     }
+
+    # The workflow independently verifies whether this author may be auto-closed.
+    let verdict = if (not $close_allowed) and $verdict.decision == 'close' {
+        $verdict
+        | update decision needs_human
+        | update reason $"Automatic closure is disabled because author permissions could not be verified; maintainer review is required. ($verdict.reason)"
+    } else {
+        $verdict
+    }
+
+    let verdict = if (not $force_implementation) and (not $close_allowed) {
+        $verdict | update implementation none
+    } else if (not $force_implementation) and (($verdict.decision != 'keep_open') or (not ($verdict.priority in $IMPLEMENTATION_PRIORITIES))) {
+        $verdict
+        | update implementation none
+    } else {
+        $verdict
+    }
+    let triage_label = if $verdict.decision == 'needs_human' {
+        'triage:needs-review'
+    } else if $verdict.decision == 'close' and $issue_kind == 'feature_request' {
+        'triage:excluded'
+    } else {
+        null
+    }
+    $verdict | insert triage_label $triage_label
 }
 
 export def pr-verdict-record [result: string, close_allowed: bool]: nothing -> record {
