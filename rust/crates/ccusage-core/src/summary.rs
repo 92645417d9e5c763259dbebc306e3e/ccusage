@@ -124,16 +124,18 @@ pub struct SessionAccumulator {
 impl SessionAccumulator {
     pub fn add_entry(&mut self, entry: &LoadedEntry) {
         self.usage.add_entry(entry);
+        let session_id = entry
+            .data
+            .session_id
+            .as_deref()
+            .map(Arc::<str>::from)
+            .unwrap_or_else(|| Arc::clone(&entry.session_id));
         if self
             .latest
             .as_ref()
             .is_none_or(|(timestamp, _, _)| entry.timestamp > *timestamp)
         {
-            self.latest = Some((
-                entry.timestamp,
-                Arc::clone(&entry.session_id),
-                Arc::clone(&entry.project_path),
-            ));
+            self.latest = Some((entry.timestamp, session_id, Arc::clone(&entry.project_path)));
         }
         if self
             .earliest
@@ -430,6 +432,36 @@ mod tests {
         let row = accumulator.into_summary().unwrap();
 
         insta::assert_json_snapshot!(row);
+    }
+
+    #[test]
+    fn session_accumulator_keeps_internal_keys_out_of_user_visible_session_ids() {
+        let mut entry = loaded_entry(LoadedEntryFixture {
+            date: "2026-01-02",
+            timestamp: 1_767_316_800_000,
+            session_id: "raw-session",
+            project_path: "/workspace/project",
+            model: Some("gpt-5.2-codex"),
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            extra_total_tokens: 0,
+            cost: 0.125,
+            credits: None,
+            message_count: Some(1),
+            version: None,
+            missing_pricing_model: None,
+        });
+        entry.session_id = Arc::from("database-key\0raw-session");
+
+        let mut accumulator = SessionAccumulator::default();
+        accumulator.add_entry(&entry);
+
+        assert_eq!(
+            accumulator.into_summary().unwrap().session_id.as_deref(),
+            Some("raw-session")
+        );
     }
 
     #[test]

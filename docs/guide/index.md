@@ -80,7 +80,7 @@ ccusage reads from local coding CLI data directories:
 | Amp            | `amp`      | `${AMP_DATA_DIR:-~/.local/share/amp}`                                |
 | Droid          | `droid`    | `${DROID_SESSIONS_DIR:-~/.factory/sessions}`                         |
 | Codebuff       | `codebuff` | `${CODEBUFF_DATA_DIR:-~/.config/manicode}`                           |
-| Hermes Agent   | `hermes`   | `${HERMES_HOME:-~/.hermes}/state.db`                                 |
+| Hermes Agent   | `hermes`   | `$HERMES_HOME/state.db` or default + named profiles                  |
 | pi-agent       | `pi`       | `${PI_AGENT_DIR:-~/.pi/agent/sessions}`                              |
 | Goose          | `goose`    | Standard Goose data roots or `GOOSE_PATH_ROOT`                       |
 | OpenClaw       | `openclaw` | `${OPENCLAW_DIR:-~/.openclaw}`                                       |

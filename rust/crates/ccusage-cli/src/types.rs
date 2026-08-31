@@ -205,6 +205,13 @@ pub const OPENCODE_AGENT_REPORTS: &[(&str, AgentReportKind)] = &[
     ("session", AgentReportKind::Session),
 ];
 
+pub const HERMES_AGENT_REPORTS: &[(&str, AgentReportKind)] = &[
+    ("daily", AgentReportKind::Daily),
+    ("weekly", AgentReportKind::Weekly),
+    ("monthly", AgentReportKind::Monthly),
+    ("session", AgentReportKind::Session),
+];
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CodexSpeed {
     #[default]

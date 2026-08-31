@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use crate::{
@@ -35,17 +37,37 @@ pub fn summarize_entries(
                 WeekDay::Sunday,
             ))
         }
-        AgentReportKind::Session => summarize_by_key(
-            entries,
-            |entry| entry.session_id.to_string(),
-            |session_id| (session_id.to_string(), None),
-        )
-        .map(|mut rows| {
-            for row in &mut rows {
-                row.session_id = row.date.take();
-            }
-            rows
-        }),
+        AgentReportKind::Session => {
+            let labels = entries
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .data
+                        .session_id
+                        .as_ref()
+                        .map(|label| (entry.session_id.to_string(), label.clone()))
+                })
+                .collect::<BTreeMap<_, _>>();
+            summarize_by_key(
+                entries,
+                |entry| entry.session_id.to_string(),
+                |session_key| {
+                    (
+                        labels
+                            .get(session_key)
+                            .cloned()
+                            .unwrap_or_else(|| session_key.to_string()),
+                        None,
+                    )
+                },
+            )
+            .map(|mut rows| {
+                for row in &mut rows {
+                    row.session_id = row.date.take();
+                }
+                rows
+            })
+        }
         AgentReportKind::Weekly => {
             let daily = summarize_entries(entries, AgentReportKind::Daily)?;
             Ok(summarize_summaries_by_bucket(

@@ -1,0 +1,39 @@
+---
+source: crates/ccusage/tests/hermes.rs
+expression: report
+---
+{
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "inputTokens": 600,
+    "outputTokens": 60,
+    "totalCost": 0.0027,
+    "totalTokens": 660
+  },
+  "weekly": [
+    {
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "inputTokens": 600,
+      "messageCount": 3,
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.0027,
+          "inputTokens": 600,
+          "modelName": "claude-sonnet-4-20250514",
+          "outputTokens": 60
+        }
+      ],
+      "modelsUsed": [
+        "claude-sonnet-4-20250514"
+      ],
+      "outputTokens": 60,
+      "totalCost": 0.0027,
+      "totalTokens": 660,
+      "week": "2025-06-15"
+    }
+  ]
+}

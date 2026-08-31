@@ -4,9 +4,9 @@ use crate::arg_parser::ArgParser;
 use crate::help::{print_help_and_exit, print_version_and_exit};
 use ccusage_cli::{
     AgentCommandArgs, AgentReportKind, BlocksArgs, CliConfig, CodexSpeed, Command, CostMode,
-    CostSource, DATE_BOUND_FORMATS, DailyArgs, OPENCODE_AGENT_REPORTS, STANDARD_AGENT_REPORTS,
-    SessionArgs, SharedArgs, SortOrder, StatuslineArgs, VisualBurnRate, WeekDay, WeeklyArgs,
-    normalize_date_bound,
+    CostSource, DATE_BOUND_FORMATS, DailyArgs, HERMES_AGENT_REPORTS, OPENCODE_AGENT_REPORTS,
+    STANDARD_AGENT_REPORTS, SessionArgs, SharedArgs, SortOrder, StatuslineArgs, VisualBurnRate,
+    WeekDay, WeeklyArgs, normalize_date_bound,
 };
 
 use crate::Cli;
@@ -288,7 +288,7 @@ fn parse_command(
             parser,
             shared,
             "hermes",
-            STANDARD_AGENT_REPORTS,
+            HERMES_AGENT_REPORTS,
             Command::Hermes,
         ),
         "pi" => parse_pi_command(parser, shared, config),
@@ -968,8 +968,9 @@ fn agent_report_supported(agent: &str, report: &str) -> bool {
         ),
         "codex" => matches!(report, "daily" | "monthly" | "session"),
         "opencode" => matches!(report, "daily" | "weekly" | "monthly" | "session"),
-        "amp" | "droid" | "codebuff" | "hermes" | "pi" | "goose" | "kilo" | "copilot"
-        | "gemini" | "kimi" | "qwen" | "openclaw" | "grok" => {
+        "hermes" => matches!(report, "daily" | "weekly" | "monthly" | "session"),
+        "amp" | "droid" | "codebuff" | "pi" | "goose" | "kilo" | "copilot" | "gemini" | "kimi"
+        | "qwen" | "openclaw" | "grok" => {
             matches!(report, "daily" | "monthly" | "session")
         }
         _ => false,

@@ -142,9 +142,11 @@ dependencies = [
  "ccusage-config",
  "ccusage-core",
  "ccusage-test-support",
+ "insta",
  "mimalloc",
  "serde",
  "serde_json",
+ "sqlite",
  "ureq",
 ]
 
@@ -308,6 +310,8 @@ dependencies = [
  "ccusage-core",
  "ccusage-test-support",
  "jiff",
+ "libc",
+ "same-file",
  "serde_json",
  "sqlite",
 ]

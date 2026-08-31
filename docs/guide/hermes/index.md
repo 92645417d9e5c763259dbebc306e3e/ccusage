@@ -2,7 +2,7 @@
 
 > Hermes Agent support is experimental. Expect changes while both ccusage and [Hermes Agent](https://github.com/NousResearch/hermes-agent) continue to evolve.
 
-ccusage can read Hermes Agent session usage from its local SQLite state database. The adapter uses the same focused and unified report shape as the other local coding CLI data sources.
+ccusage can read Hermes Agent session usage from its local SQLite state databases. The adapter uses the same focused and unified report shape as the other local coding CLI data sources.
 
 ## Focused Views
 
@@ -24,15 +24,18 @@ pnpm dlx ccusage hermes --help
 
 ## Data Source
 
-The CLI reads Hermes Agent session rows from `$HERMES_HOME/state.db`. When `HERMES_HOME` is not set, ccusage checks `~/.hermes/state.db`.
+The CLI reads Hermes Agent session rows from local SQLite state databases. When `HERMES_HOME` is not set, ccusage checks the default database at `~/.hermes/state.db` and each named profile database at `~/.hermes/profiles/<name>/state.db`.
 
 ```bash
-HERMES_HOME="$HOME/.hermes" ccusage hermes daily
+ccusage hermes daily
 ```
 
 ```text
 ~/.hermes/
-└── state.db
+├── state.db
+└── profiles/
+    ├── personal/state.db
+    └── work/state.db
 ```
 
 ## Report Views
@@ -40,10 +43,13 @@ HERMES_HOME="$HOME/.hermes" ccusage hermes daily
 | Focused view             | Description                      | See also                                |
 | ------------------------ | -------------------------------- | --------------------------------------- |
 | `ccusage hermes daily`   | Aggregate usage by date          | [Daily Usage](/guide/daily-reports)     |
+| `ccusage hermes weekly`  | Aggregate usage by week          | [Weekly Usage](/guide/weekly-reports)   |
 | `ccusage hermes monthly` | Aggregate usage by month         | [Monthly Usage](/guide/monthly-reports) |
 | `ccusage hermes session` | Group usage by Hermes session ID | [Session Usage](/guide/session-reports) |
 
 These views support `--json`, `--compact`, `--offline`, `--since`, `--until`, and `--timezone`.
+Profile session labels are always qualified as `<profile>/<session-id>`, including when the
+session ID is unique to that profile database.
 
 ## What Gets Calculated
 
@@ -54,15 +60,15 @@ These views support `--json`, `--compact`, `--offline`, `--since`, `--until`, an
 
 ## Environment Variables
 
-| Variable      | Description                                                                       |
-| ------------- | --------------------------------------------------------------------------------- |
-| `HERMES_HOME` | Override the directory containing `state.db`; comma-separated roots are supported |
-| `LOG_LEVEL`   | Adjust verbosity (0 silent ... 5 trace)                                           |
+| Variable      | Description                                                                                                             |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `HERMES_HOME` | Override the directories containing `state.db`; comma-separated roots are supported, and only the listed roots are read |
+| `LOG_LEVEL`   | Adjust verbosity (0 silent ... 5 trace)                                                                                 |
 
 ## Troubleshooting
 
 ::: details No Hermes Agent usage data found
-Ensure the database exists at `$HERMES_HOME/state.db` or `~/.hermes/state.db`. If your database lives elsewhere, set `HERMES_HOME` to the directory that contains `state.db`.
+Ensure a database exists at `$HERMES_HOME/state.db`, `~/.hermes/state.db`, or `~/.hermes/profiles/<name>/state.db`. If your database lives elsewhere, set `HERMES_HOME` to the directory that contains `state.db`.
 :::
 
 ::: details Costs showing as $0.00

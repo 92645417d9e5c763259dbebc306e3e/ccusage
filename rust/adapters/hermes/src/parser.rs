@@ -20,13 +20,33 @@ pub(super) struct HermesEntry {
     cost_usd: Option<f64>,
 }
 
-pub(super) fn read_session_row(statement: &sqlite::Statement<'_>) -> Option<HermesEntry> {
-    let session_id = statement.read::<String, _>(0).ok()?;
-    let model = statement.read::<String, _>(1).ok()?.trim().to_string();
+pub(super) trait SessionRow {
+    fn read_text(&self, index: usize) -> Option<String>;
+    fn read_integer(&self, index: usize) -> Option<i64>;
+    fn read_real(&self, index: usize) -> Option<f64>;
+}
+
+impl SessionRow for sqlite::Statement<'_> {
+    fn read_text(&self, index: usize) -> Option<String> {
+        self.read::<String, _>(index).ok()
+    }
+
+    fn read_integer(&self, index: usize) -> Option<i64> {
+        self.read::<i64, _>(index).ok()
+    }
+
+    fn read_real(&self, index: usize) -> Option<f64> {
+        self.read::<f64, _>(index).ok()
+    }
+}
+
+pub(super) fn read_session_row(statement: &impl SessionRow) -> Option<HermesEntry> {
+    let session_id = statement.read_text(0)?;
+    let model = statement.read_text(1)?.trim().to_string();
     if session_id.is_empty() || model.is_empty() {
         return None;
     }
-    let provider_raw = statement.read::<String, _>(2).ok();
+    let provider_raw = statement.read_text(2);
     let started_at = read_f64(statement, 3)?;
     let timestamp = timestamp_from_number(started_at)?;
     let message_count = read_u64(statement, 4);
@@ -67,35 +87,27 @@ pub(super) fn read_session_row(statement: &sqlite::Statement<'_>) -> Option<Herm
     })
 }
 
-fn read_u64(statement: &sqlite::Statement<'_>, index: usize) -> u64 {
+fn read_u64(statement: &impl SessionRow, index: usize) -> u64 {
     statement
-        .read::<i64, _>(index)
-        .ok()
+        .read_integer(index)
         .and_then(|value| u64::try_from(value.max(0)).ok())
         .or_else(|| {
             statement
-                .read::<f64, _>(index)
-                .ok()
+                .read_real(index)
                 .filter(|value| value.is_finite() && *value > 0.0)
                 .map(|value| value.trunc() as u64)
         })
         .unwrap_or(0)
 }
 
-fn read_f64(statement: &sqlite::Statement<'_>, index: usize) -> Option<f64> {
+fn read_f64(statement: &impl SessionRow, index: usize) -> Option<f64> {
     statement
-        .read::<f64, _>(index)
-        .ok()
+        .read_real(index)
         .filter(|value| value.is_finite())
-        .or_else(|| {
-            statement
-                .read::<i64, _>(index)
-                .ok()
-                .map(|value| value as f64)
-        })
+        .or_else(|| statement.read_integer(index).map(|value| value as f64))
 }
 
-fn read_non_negative_f64(statement: &sqlite::Statement<'_>, index: usize) -> Option<f64> {
+fn read_non_negative_f64(statement: &impl SessionRow, index: usize) -> Option<f64> {
     read_f64(statement, index).map(|value| value.max(0.0))
 }
 
@@ -143,17 +155,20 @@ pub(super) fn to_loaded_entry(
     entry: HermesEntry,
     tz: Option<&JiffTimeZone>,
     pricing: &PricingMap,
+    session_key: &str,
+    session_label: Option<&str>,
 ) -> LoadedEntry {
     let cost = calculate_hermes_cost(&entry, pricing);
     let missing_pricing_model = missing_hermes_pricing(&entry, pricing);
+    let session_label = session_label.unwrap_or(&entry.session_id);
     let data = UsageEntry {
-        session_id: Some(entry.session_id.clone()),
+        session_id: Some(session_label.to_string()),
         timestamp: entry.timestamp_text.clone(),
         version: None,
         message: UsageMessage {
             usage: entry.usage,
             model: Some(entry.model.clone()),
-            id: Some(format!("hermes:{}", entry.session_id)),
+            id: Some(format!("hermes:{session_label}")),
         },
         cost_usd: entry.cost_usd,
         request_id: None,
@@ -164,7 +179,7 @@ pub(super) fn to_loaded_entry(
         date: format_date_tz(entry.timestamp, tz),
         timestamp: entry.timestamp,
         project: Arc::from("hermes"),
-        session_id: Arc::from(entry.session_id.as_str()),
+        session_id: Arc::from(session_key),
         project_path: Arc::from("Hermes"),
         cost,
         credits: None,
