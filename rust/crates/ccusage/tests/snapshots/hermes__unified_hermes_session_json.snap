@@ -1,0 +1,85 @@
+---
+source: crates/ccusage/tests/hermes.rs
+expression: report
+---
+{
+  "session": [
+    {
+      "agent": "hermes",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "inputTokens": 200,
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.0009000000000000001,
+          "inputTokens": 200,
+          "modelName": "claude-sonnet-4-20250514",
+          "outputTokens": 20
+        }
+      ],
+      "modelsUsed": [
+        "claude-sonnet-4-20250514"
+      ],
+      "outputTokens": 20,
+      "period": "alpha/collision",
+      "totalCost": 0.0009000000000000001,
+      "totalTokens": 220
+    },
+    {
+      "agent": "hermes",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "inputTokens": 300,
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.00135,
+          "inputTokens": 300,
+          "modelName": "claude-sonnet-4-20250514",
+          "outputTokens": 30
+        }
+      ],
+      "modelsUsed": [
+        "claude-sonnet-4-20250514"
+      ],
+      "outputTokens": 30,
+      "period": "beta/collision",
+      "totalCost": 0.00135,
+      "totalTokens": 330
+    },
+    {
+      "agent": "hermes",
+      "cacheCreationTokens": 0,
+      "cacheReadTokens": 0,
+      "inputTokens": 100,
+      "modelBreakdowns": [
+        {
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "cost": 0.00045,
+          "inputTokens": 100,
+          "modelName": "claude-sonnet-4-20250514",
+          "outputTokens": 10
+        }
+      ],
+      "modelsUsed": [
+        "claude-sonnet-4-20250514"
+      ],
+      "outputTokens": 10,
+      "period": "collision",
+      "totalCost": 0.00045,
+      "totalTokens": 110
+    }
+  ],
+  "totals": {
+    "cacheCreationTokens": 0,
+    "cacheReadTokens": 0,
+    "inputTokens": 600,
+    "outputTokens": 60,
+    "totalCost": 0.0027,
+    "totalTokens": 660
+  }
+}

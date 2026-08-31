@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    ffi::{CStr, CString},
+    ffi::{CStr, CString, c_void},
     fs::File,
     marker::PhantomData,
     os::raw::c_int,
@@ -9,8 +9,8 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
+#[cfg(windows)]
+use std::os::windows::io::FromRawHandle;
 
 use crate::{LoadedEntry, PricingMap, Result, cli::SharedArgs, read_files_parallel};
 
@@ -55,14 +55,38 @@ fn canonical_path_without_final_component(path: &Path) -> Option<PathBuf> {
     Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?))
 }
 
+#[cfg(unix)]
+#[repr(C)]
+struct UnixSqliteFile {
+    _methods: *const sqlite::ffi::sqlite3_io_methods,
+    _vfs: *mut sqlite::ffi::sqlite3_vfs,
+    _inode: *mut c_void,
+    fd: c_int,
+}
+
+#[cfg(windows)]
+const DUPLICATE_SAME_ACCESS: u32 = 0x0000_0002;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "GetCurrentProcess"]
+    fn get_current_process() -> *mut c_void;
+    #[link_name = "DuplicateHandle"]
+    fn duplicate_handle(
+        source_process_handle: *mut c_void,
+        source_handle: *mut c_void,
+        target_process_handle: *mut c_void,
+        target_handle: *mut *mut c_void,
+        desired_access: u32,
+        inherit_handle: i32,
+        options: u32,
+    ) -> i32;
+}
+
 impl SqliteConnection {
     fn open(path: &Path, file: Arc<File>, no_follow: bool) -> Option<Self> {
-        // SQLite derives live WAL and SHM filenames from the pathname, so use the discovered path
-        // for profiles and retain the descriptor only for a path that is no longer safe to follow.
         if no_follow && !is_regular_non_symlink(path) {
-            #[cfg(unix)]
-            return Self::open_descriptor(file);
-            #[cfg(not(unix))]
             return None;
         }
 
@@ -80,38 +104,14 @@ impl SqliteConnection {
         };
         #[cfg(not(unix))]
         let sqlite_path = Some(path.to_path_buf());
-        let Some(sqlite_path) = sqlite_path else {
-            #[cfg(unix)]
-            return Self::open_descriptor(file);
-            #[cfg(not(unix))]
-            return None;
-        };
+        let sqlite_path = sqlite_path?;
         let connection = sqlite_path
             .to_str()
-            .and_then(|path| Self::open_path(path, flags, Arc::clone(&file)));
-        if !no_follow {
-            return connection;
+            .and_then(|path| Self::open_path(path, flags, Arc::clone(&file)))?;
+        if no_follow && (!is_regular_non_symlink(path) || !file_matches_path(path, &file)) {
+            return None;
         }
-        if let Some(connection) = connection
-            && is_regular_non_symlink(path)
-            && file_matches_path(path, &file)
-        {
-            return Some(connection);
-        }
-
-        #[cfg(unix)]
-        return Self::open_descriptor(file);
-        #[cfg(not(unix))]
-        None
-    }
-
-    #[cfg(unix)]
-    fn open_descriptor(file: Arc<File>) -> Option<Self> {
-        Self::open_path(
-            &format!("/dev/fd/{}", file.as_raw_fd()),
-            sqlite::ffi::SQLITE_OPEN_READONLY,
-            file,
-        )
+        Some(connection)
     }
 
     fn open_path(path: &str, flags: c_int, file: Arc<File>) -> Option<Self> {
@@ -126,7 +126,103 @@ impl SqliteConnection {
             }
             return None;
         }
-        Some(Self { raw, _file: file })
+        let connection = Self { raw, _file: file };
+        connection.matches_open_file().then_some(connection)
+    }
+
+    fn file_control(&self, opcode: c_int, argument: *mut c_void) -> bool {
+        unsafe {
+            sqlite::ffi::sqlite3_file_control(self.raw, c"main".as_ptr(), opcode, argument)
+                == sqlite::ffi::SQLITE_OK
+        }
+    }
+
+    fn main_file_pointer(&self) -> Option<*mut sqlite::ffi::sqlite3_file> {
+        let mut file: *mut sqlite::ffi::sqlite3_file = ptr::null_mut();
+        self.file_control(
+            sqlite::ffi::SQLITE_FCNTL_FILE_POINTER,
+            (&mut file as *mut *mut sqlite::ffi::sqlite3_file).cast(),
+        )
+        .then_some(file)
+        .filter(|file| !file.is_null())
+    }
+
+    fn has_not_moved(&self) -> bool {
+        let mut moved = 0;
+        self.file_control(
+            sqlite::ffi::SQLITE_FCNTL_HAS_MOVED,
+            (&mut moved as *mut c_int).cast(),
+        ) && moved == 0
+    }
+
+    fn matches_open_file(&self) -> bool {
+        if !self.has_not_moved() {
+            return false;
+        }
+        let Some(file_pointer) = self.main_file_pointer() else {
+            return false;
+        };
+        #[cfg(unix)]
+        {
+            // The bundled Unix VFS stores the descriptor after sqlite3_file's public prefix.
+            let sqlite_file = unsafe { &*file_pointer.cast::<UnixSqliteFile>() };
+            if sqlite_file.fd < 0 {
+                return false;
+            }
+            let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+            if unsafe { libc::fstat(sqlite_file.fd, metadata.as_mut_ptr()) } != 0 {
+                return false;
+            }
+            let metadata = unsafe { metadata.assume_init() };
+            let Ok(file_metadata) = self._file.metadata() else {
+                return false;
+            };
+            use std::os::unix::fs::MetadataExt;
+
+            metadata.st_dev as u64 == file_metadata.dev() && metadata.st_ino == file_metadata.ino()
+        }
+        #[cfg(windows)]
+        {
+            let mut handle = ptr::null_mut();
+            if !self.file_control(
+                sqlite::ffi::SQLITE_FCNTL_WIN32_GET_HANDLE,
+                (&mut handle as *mut *mut c_void).cast(),
+            ) || handle.is_null()
+            {
+                return false;
+            }
+            let process = unsafe { get_current_process() };
+            let mut duplicate = ptr::null_mut();
+            let duplicated = unsafe {
+                duplicate_handle(
+                    process,
+                    handle,
+                    process,
+                    &mut duplicate,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                )
+            };
+            if duplicated == 0 || duplicate.is_null() {
+                return false;
+            }
+            let sqlite_file = unsafe { File::from_raw_handle(duplicate) };
+            let Ok(sqlite_metadata) = sqlite_file.metadata() else {
+                return false;
+            };
+            let Ok(file_metadata) = self._file.metadata() else {
+                return false;
+            };
+            use std::os::windows::fs::MetadataExt;
+
+            sqlite_metadata.volume_serial_number() == file_metadata.volume_serial_number()
+                && sqlite_metadata.file_index() == file_metadata.file_index()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            false
+        }
     }
 
     fn prepare(&self, query: &str) -> Option<SqliteStatement<'_>> {
@@ -527,7 +623,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn reads_the_database_opened_during_profile_discovery_after_path_replacement() {
+    fn fails_closed_when_a_profile_path_is_replaced_with_a_symlink() {
         use std::os::unix::fs::symlink;
 
         let fixture = fs_fixture!({});
@@ -559,13 +655,42 @@ mod tests {
             &test_shared_args(),
         );
 
-        assert_eq!(
-            entries
-                .into_iter()
-                .map(|entry| entry.session_id)
-                .collect::<Vec<_>>(),
-            vec!["original"]
+        assert!(entries.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_different_database_at_a_profile_path() {
+        let fixture = fs_fixture!({});
+        let profile_db = fixture.path(".hermes/profiles/work/state.db");
+        let replacement_db = fixture.path("replacement.db");
+        let _ = fixture.create_dir_all(".hermes/profiles/work");
+        create_state_db(&profile_db);
+        create_state_db(&replacement_db);
+        insert_session(&profile_db, "original", 1_750_000_000.0, 100, 10);
+        insert_session(&replacement_db, "replacement", 1_750_000_001.0, 200, 20);
+        let _env_guard = EnvVarsGuard::set_many([
+            ("HOME", Some(fixture.root().as_os_str().to_os_string())),
+            ("HERMES_HOME", None),
+        ]);
+        let profile = hermes_state_db_paths()
+            .unwrap()
+            .into_iter()
+            .find(|database| database.profile_name.as_deref() == Some(std::ffi::OsStr::new("work")))
+            .unwrap();
+
+        let moved_db = fixture.path("original.db");
+        fs::rename(&profile.path, &moved_db).unwrap();
+        fs::rename(&replacement_db, &profile.path).unwrap();
+
+        let entries = load_state_db_entries(
+            &profile.path,
+            Arc::clone(&profile.file),
+            profile.no_follow,
+            &test_shared_args(),
         );
+
+        assert!(entries.is_empty());
     }
 
     #[cfg(not(unix))]

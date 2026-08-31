@@ -96,6 +96,45 @@ fn run_hermes_report(
     output
 }
 
+fn run_unified_report(fixture: &Fixture, mode: &str, json: bool) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ccusage"));
+    command
+        .env("HOME", fixture.root())
+        .env_remove("HERMES_HOME")
+        .env("LOG_LEVEL", "0")
+        .env("CLAUDE_CONFIG_DIR", fixture.path("empty-claude"))
+        .env("CODEX_HOME", fixture.path("empty-codex"))
+        .env("OPENCODE_DATA_DIR", fixture.path("empty-opencode"))
+        .env("AMP_DATA_DIR", fixture.path("empty-amp"))
+        .env("DROID_SESSIONS_DIR", fixture.path("empty-droid"))
+        .env("CODEBUFF_DATA_DIR", fixture.path("empty-codebuff"))
+        .env("PI_AGENT_DIR", fixture.path("empty-pi"))
+        .env("GOOSE_PATH_ROOT", fixture.path("empty-goose"))
+        .env("OPENCLAW_DIR", fixture.path("empty-openclaw"))
+        .env("KILO_DATA_DIR", fixture.path("empty-kilo"))
+        .env(
+            "COPILOT_OTEL_FILE_EXPORTER_PATH",
+            fixture.path("missing-copilot.jsonl"),
+        )
+        .env("GEMINI_DATA_DIR", fixture.path("empty-gemini"))
+        .env("KIMI_DATA_DIR", fixture.path("empty-kimi"))
+        .env("QWEN_DATA_DIR", fixture.path("empty-qwen"))
+        .env("GROK_HOME", fixture.path("empty-grok"))
+        .env("USERPROFILE", fixture.path("empty-userprofile"))
+        .env("XDG_CONFIG_HOME", fixture.path("empty-xdg-config"))
+        .args([mode, "--offline", "--timezone", "UTC", "--no-color"]);
+    if json {
+        command.arg("--json");
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "ccusage {mode} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
 fn report_rows<'a>(report: &'a Value, mode: &str) -> &'a [Value] {
     let key = if mode == "session" { "sessions" } else { mode };
     report[key].as_array().unwrap()
@@ -146,6 +185,43 @@ fn cli_json_and_table_reports_preserve_profile_scoped_session_ids() {
 }
 
 #[test]
+fn root_unified_reports_preserve_profile_scoped_session_ids() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.path("empty-claude/projects")).unwrap();
+    create_state_db(&fixture.path(".hermes/state.db"), &[("collision", 100, 10)]);
+    create_state_db(
+        &fixture.path(".hermes/profiles/alpha/state.db"),
+        &[("collision", 200, 20)],
+    );
+    create_state_db(
+        &fixture.path(".hermes/profiles/beta/state.db"),
+        &[("collision", 300, 30)],
+    );
+
+    for mode in REPORT_MODES {
+        let output = run_unified_report(&fixture, mode, true);
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        match mode {
+            "daily" => insta::assert_json_snapshot!("unified_hermes_daily_json", report),
+            "weekly" => insta::assert_json_snapshot!("unified_hermes_weekly_json", report),
+            "monthly" => insta::assert_json_snapshot!("unified_hermes_monthly_json", report),
+            "session" => insta::assert_json_snapshot!("unified_hermes_session_json", report),
+            _ => unreachable!(),
+        }
+
+        let output = run_unified_report(&fixture, mode, false);
+        let table = String::from_utf8(output.stdout).unwrap();
+        match mode {
+            "daily" => insta::assert_snapshot!("unified_hermes_daily_table", table),
+            "weekly" => insta::assert_snapshot!("unified_hermes_weekly_table", table),
+            "monthly" => insta::assert_snapshot!("unified_hermes_monthly_table", table),
+            "session" => insta::assert_snapshot!("unified_hermes_session_table", table),
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[test]
 fn cli_reads_automatic_profile_database_with_live_wal_sidecars() {
     let fixture = Fixture::new();
     let profile_db = fixture.path(".hermes/profiles/live/state.db");
@@ -156,6 +232,7 @@ fn cli_reads_automatic_profile_database_with_live_wal_sidecars() {
     insert_session(&db, "live", 100, 10);
 
     assert!(fixture.path(".hermes/profiles/live/state.db-wal").is_file());
+    assert!(fixture.path(".hermes/profiles/live/state.db-shm").is_file());
     let output = run_hermes_report(&fixture, "session", true, None);
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
 

@@ -30,18 +30,18 @@ pub(super) struct HermesStateDbPath {
 pub(super) enum DatabaseIdentity {
     #[cfg(unix)]
     File { device: u64, inode: u64 },
-    #[cfg(not(unix))]
-    Path(PathBuf),
+    #[cfg(windows)]
+    File { volume: u64, index: u64 },
+    #[cfg(not(any(unix, windows)))]
+    Unsupported,
 }
 
 impl DatabaseIdentity {
-    fn from_open_file(file: &File, path: &Path) -> Option<Self> {
+    fn from_open_file(file: &File, _path: &Path) -> Option<Self> {
         let metadata = file.metadata().ok()?;
         if !metadata.file_type().is_file() {
             return None;
         }
-        #[cfg(unix)]
-        let _ = path;
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -51,20 +51,27 @@ impl DatabaseIdentity {
                 inode: metadata.ino(),
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            Some(Self::Path(
-                fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
-            ))
+            use std::os::windows::fs::MetadataExt;
+
+            Some(Self::File {
+                volume: metadata.volume_serial_number(),
+                index: metadata.file_index(),
+            })
         }
+        #[cfg(not(any(unix, windows)))]
+        None
     }
 
     pub(super) fn session_key(&self, session_id: &str) -> String {
         match self {
             #[cfg(unix)]
             Self::File { device, inode } => format!("{device}:{inode}\0{session_id}"),
-            #[cfg(not(unix))]
-            Self::Path(path) => format!("{}\0{session_id}", path.display()),
+            #[cfg(windows)]
+            Self::File { volume, index } => format!("{volume}:{index}\0{session_id}"),
+            #[cfg(not(any(unix, windows)))]
+            Self::Unsupported => format!("unsupported\0{session_id}"),
         }
     }
 }
