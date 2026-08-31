@@ -14,11 +14,17 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::{ffi::c_void, os::windows::io::AsRawHandle};
+use std::{
+    ffi::c_void,
+    os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+};
 
 use crate::Result;
 
 const HERMES_HOME_ENV: &str = "HERMES_HOME";
+
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x02000000;
 
 #[cfg(windows)]
 #[repr(C)]
@@ -272,7 +278,7 @@ fn open_profiles_directory(path: &Path) -> Option<File> {
     if !metadata.file_type().is_dir() {
         return None;
     }
-    let file = File::open(path).ok()?;
+    let file = open_directory(path)?;
     let metadata = fs::symlink_metadata(path).ok()?;
     if metadata.file_type().is_symlink()
         || !metadata.file_type().is_dir()
@@ -320,7 +326,7 @@ fn open_profile_state_db(
     if !metadata.file_type().is_dir() {
         return None;
     }
-    let profile_directory = File::open(profile_dir).ok()?;
+    let profile_directory = open_directory(profile_dir)?;
     if !profile_directory.metadata().ok()?.file_type().is_dir()
         || !file_matches_path(profile_dir, &profile_directory)
     {
@@ -335,6 +341,18 @@ fn open_profile_state_db(
         return None;
     }
     Some(state_db)
+}
+
+#[cfg(windows)]
+fn open_directory(path: &Path) -> Option<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    options.open(path).ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_directory(path: &Path) -> Option<File> {
+    File::open(path).ok()
 }
 
 pub(super) fn is_regular_non_symlink(path: &Path) -> bool {
