@@ -6,6 +6,7 @@ use ./core.nu [
     gh-api-body
     gh-api-json
     issue-number
+    optional-env
     repository
     required-env
     write-output
@@ -530,6 +531,14 @@ export def issue-implementation-request []: nothing -> nothing {
         write-output implementation none
         return
     }
+    let force_implementation = (optional-env FORCE_IMPLEMENTATION 'false') == 'true'
+    let current_issue = require-open-issue
+    if (not $force_implementation) and $current_issue.implementation_blocked {
+        let body = comment-body $COMMENT_MARKER 'Automatic implementation was not started because a trusted security or maintainer-review label requires explicit maintainer approval.'
+        upsert-comment $repo $number $body --require-open-issue
+        write-output implementation none
+        return
+    }
     let implementation_marker = $"<!-- pullfrog-accepted-issue: #($number) request-(random uuid) -->"
     let coauthor_trailer = $"Co-authored-by: ($issue_author) <($coauthor_email)>"
     let implementation_branch = (implementation-branch
@@ -552,6 +561,13 @@ export def issue-implementation-request []: nothing -> nothing {
 export def issue-implementation-guard []: nothing -> nothing {
     let repo = repository
     let issue = require-open-issue
+    let force_implementation = (optional-env FORCE_IMPLEMENTATION 'false') == 'true'
+    if (not $force_implementation) and $issue.implementation_blocked {
+        let body = comment-body $COMMENT_MARKER 'Automatic implementation was stopped because a trusted security or maintainer-review label requires explicit maintainer approval.'
+        upsert-comment $repo $issue.number $body --require-open-issue
+        write-output skip 'true'
+        return
+    }
     let existing = existing-issue-pull-request $repo $issue.number
     if $existing == null {
         write-output skip 'false'

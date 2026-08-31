@@ -315,7 +315,7 @@ export def issue-verdict []: nothing -> nothing {
 
     ensure-gate-labels $repo
     apply-priority-label $repo $number $verdict.priority
-    if $verdict.decision == 'close' {
+    if $verdict.decision == 'close' or $verdict.implementation == 'create_pr' {
         apply-triage-label $repo $number $verdict.triage_label --preserve-protected
     } else {
         apply-triage-label $repo $number $verdict.triage_label

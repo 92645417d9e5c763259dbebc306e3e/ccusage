@@ -177,6 +177,7 @@ jobs:
           ISSUE_NUMBER: ${{ needs.triage.outputs.issue_number }}
           ISSUE_AUTHOR: ${{ needs.triage.outputs.issue_author }}
           ISSUE_AUTHOR_ID: ${{ needs.triage.outputs.issue_author_id }}
+          FORCE_IMPLEMENTATION: ${{ inputs.force_implementation == true }}
         run: nu .github/scripts/contribution-gate.nu issue-implementation-request
 
   implement:
@@ -226,6 +227,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           ISSUE_NUMBER: ${{ needs.triage.outputs.issue_number }}
+          FORCE_IMPLEMENTATION: ${{ inputs.force_implementation == true }}
         run: nu .github/scripts/contribution-gate.nu issue-implementation-guard
 
       - name: Ask Pullfrog to implement the issue
