@@ -577,9 +577,29 @@ export def issue-implementation-guard []: nothing -> nothing {
     write-output skip 'true'
 }
 
+def implementation-publication-state [force_implementation: bool]: nothing -> record {
+    let issue = require-open-issue
+    {
+        issue: $issue
+        blocked: ((not $force_implementation) and $issue.implementation_blocked)
+    }
+}
+
+def report-publication-blocked [repo: string, number: int]: nothing -> nothing {
+    let body = comment-body $COMMENT_MARKER 'Automatic implementation publication was stopped because a trusted security or maintainer-review label requires explicit maintainer approval.'
+    upsert-comment $repo $number $body --require-open-issue
+    write-output skip 'true'
+}
+
 export def publish-implementation []: nothing -> nothing {
     let repo = repository
-    let issue = require-open-issue
+    let force_implementation = (optional-env FORCE_IMPLEMENTATION 'false') == 'true'
+    let initial_state = implementation-publication-state $force_implementation
+    let issue = $initial_state.issue
+    if $initial_state.blocked {
+        report-publication-blocked $repo $issue.number
+        return
+    }
     let existing = existing-issue-pull-request $repo $issue.number
     if $existing != null {
         print $"Skipping publication because open PR #($existing.number) already targets issue #($issue.number)."
@@ -636,18 +656,26 @@ export def publish-implementation []: nothing -> nothing {
     ]
     setup-git-auth
 
-    require-open-issue | ignore
+    let pre_push_state = implementation-publication-state $force_implementation
+    if $pre_push_state.blocked {
+        report-publication-blocked $repo $issue.number
+        return
+    }
     git-run [push --set-upstream origin $"HEAD:refs/heads/($branch)"]
 
     let pre_create = (with-failure-cleanup
         {||
-            require-open-issue | ignore
+            let publication_state = implementation-publication-state $force_implementation
+            if $publication_state.blocked {
+                return {existing: null, body: null, blocked: true}
+            }
             let existing = existing-issue-pull-request $repo $issue.number
             if $existing != null {
-                {existing: $existing, body: null}
+                {existing: $existing, body: null, blocked: false}
             } else {
                 {
                     existing: null
+                    blocked: false
                     body: (implementation-pull-request-body
                         (required-env IMPLEMENTATION_MARKER)
                         $result.body
@@ -658,15 +686,23 @@ export def publish-implementation []: nothing -> nothing {
         }
         {|| git-run [push origin --delete $branch] }
     )
+    if $pre_create.blocked {
+        git-run [push origin --delete $branch]
+        report-publication-blocked $repo $issue.number
+        return
+    }
     if $pre_create.existing != null {
         git-run [push origin --delete $branch]
         print $"Skipping publication because open PR #($pre_create.existing.number) now targets issue #($issue.number)."
         write-output skip 'true'
         return
     }
-    let pull_number = (with-failure-cleanup
+    let publication = (with-failure-cleanup
         {||
-            require-open-issue | ignore
+            let publication_state = implementation-publication-state $force_implementation
+            if $publication_state.blocked {
+                return {blocked: true, pull_number: null}
+            }
             let created = gh-api-body POST $"repos/($repo)/pulls" {
                 title: $title
                 head: $branch
@@ -677,19 +713,31 @@ export def publish-implementation []: nothing -> nothing {
             if ($pull_number | describe) != 'int' or $pull_number <= 0 {
                 error make {msg: 'GitHub returned an invalid implementation pull request'}
             }
-            $pull_number
+            {blocked: false, pull_number: $pull_number}
         }
         {|| discard-unvalidated-publication $repo $branch }
     )
+    if $publication.blocked {
+        git-run [push origin --delete $branch]
+        report-publication-blocked $repo $issue.number
+        return
+    }
+    let pull_number = $publication.pull_number
     let reconciliation = try {
-        require-open-issue | ignore
+        let publication_state = implementation-publication-state $force_implementation
         let closing_pull_requests = closing-pull-requests $repo $issue.number
         {
+            blocked: $publication_state.blocked
             competing: (competing-closing-pull-request $closing_pull_requests $pull_number)
         }
     } catch {
         discard-created-pull-request $repo $pull_number $branch
         error make {msg: 'Could not reconcile competing pull requests after publication; the workflow-created pull request was closed'}
+    }
+    if $reconciliation.blocked {
+        discard-created-pull-request $repo $pull_number $branch
+        report-publication-blocked $repo $issue.number
+        return
     }
     let competing = $reconciliation.competing
     if $competing != null {

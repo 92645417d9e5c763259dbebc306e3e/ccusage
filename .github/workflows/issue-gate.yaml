@@ -432,6 +432,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           ISSUE_NUMBER: ${{ needs.triage.outputs.issue_number }}
+          FORCE_IMPLEMENTATION: ${{ inputs.force_implementation == true }}
           IMPLEMENTATION_BASE_SHA: ${{ needs.implement.outputs.base_sha }}
           IMPLEMENTATION_BRANCH: ${{ needs.apply.outputs.implementation_branch }}
           IMPLEMENTATION_MARKER: ${{ needs.apply.outputs.implementation_marker }}
