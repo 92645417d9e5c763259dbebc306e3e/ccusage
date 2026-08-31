@@ -34,12 +34,14 @@ def ensure-label [repo: string, label: string, color: string]: nothing -> nothin
 
 def ensure-gate-labels [repo: string]: nothing -> nothing {
     [
-        {name: 'priority:critical', color: b60205}
-        {name: 'priority:high', color: d93f0b}
-        {name: 'priority:medium', color: fbca04}
-        {name: 'priority:low', color: 0e8a16}
-        {name: 'triage:excluded', color: cfd3d7}
-        {name: 'triage:needs-review', color: d4c5f9}
+        {name: 'priority:critical', color: 'b60205'}
+        {name: 'priority:high', color: 'd93f0b'}
+        {name: 'priority:medium', color: 'fbca04'}
+        {name: 'priority:low', color: '0e8a16'}
+        {name: 'triage:resolved', color: '0e8a16'}
+        {name: 'triage:maintainable', color: '1d76db'}
+        {name: 'triage:excluded', color: 'cfd3d7'}
+        {name: 'triage:needs-review', color: 'd4c5f9'}
     ]
     | each {|label| ensure-label $repo $label.name $label.color }
     | ignore

@@ -603,9 +603,9 @@ def test-issue-product-scope-policy []: nothing -> nothing {
     expect 'allows a focused implementation for a high-priority regression' (
         $regression_verdict.implementation
     ) create_pr
-    expect 'does not assign a triage disposition to an accepted regression' (
+    expect 'marks an accepted regression as maintainable' (
         $regression_verdict.triage_label
-    ) null
+    ) 'triage:maintainable'
 
     let unsafe_regression = '{"decision":"close","priority":"priority:high","implementation":"none","issue_kind":"supported_behavior_bug","reason":"The report appears difficult to reproduce."}'
     let unsafe_regression_verdict = issue-verdict-record $unsafe_regression true
@@ -637,9 +637,9 @@ def test-issue-product-scope-policy []: nothing -> nothing {
     expect 'implements a manually forced feature request' (
         $forced_verdict.implementation
     ) create_pr
-    expect 'clears automatic triage labels for a forced implementation' (
+    expect 'marks a forced implementation as maintainable' (
         $forced_verdict.triage_label
-    ) null
+    ) 'triage:maintainable'
 
     for invalid in [
         '{"decision":"keep_open","priority":"priority:medium","implementation":"none","reason":"Missing kind."}'

@@ -99,7 +99,7 @@ export def issue-verdict-record [result: string, close_allowed: bool, --force-im
     } else if $verdict.decision == 'close' and $issue_kind == 'feature_request' {
         'triage:excluded'
     } else {
-        null
+        'triage:maintainable'
     }
     $verdict | insert triage_label $triage_label
 }
