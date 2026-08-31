@@ -13,9 +13,61 @@ use std::{
     os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
 };
 
+#[cfg(windows)]
+use std::{ffi::c_void, os::windows::io::AsRawHandle};
+
 use crate::Result;
 
 const HERMES_HOME_ENV: &str = "HERMES_HOME";
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsFileTime {
+    _low_date_time: u32,
+    _high_date_time: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct WindowsFileInformation {
+    _file_attributes: u32,
+    _creation_time: WindowsFileTime,
+    _last_access_time: WindowsFileTime,
+    _last_write_time: WindowsFileTime,
+    volume_serial_number: u32,
+    _file_size_high: u32,
+    _file_size_low: u32,
+    _number_of_links: u32,
+    file_index_high: u32,
+    file_index_low: u32,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "GetFileInformationByHandle"]
+    fn get_file_information_by_handle(
+        handle: *mut c_void,
+        file_information: *mut WindowsFileInformation,
+    ) -> i32;
+}
+
+#[cfg(windows)]
+fn windows_file_identity(handle: *mut c_void) -> Option<(u64, u64)> {
+    if handle.is_null() {
+        return None;
+    }
+    let mut file_information = std::mem::MaybeUninit::<WindowsFileInformation>::uninit();
+    let available =
+        unsafe { get_file_information_by_handle(handle, file_information.as_mut_ptr()) };
+    if available == 0 {
+        return None;
+    }
+    let file_information = unsafe { file_information.assume_init() };
+    let file_index = (u64::from(file_information.file_index_high) << 32)
+        | u64::from(file_information.file_index_low);
+    Some((u64::from(file_information.volume_serial_number), file_index))
+}
 
 #[derive(Clone, Debug)]
 pub(super) struct HermesStateDbPath {
@@ -37,7 +89,7 @@ pub(super) enum DatabaseIdentity {
 }
 
 impl DatabaseIdentity {
-    fn from_open_file(file: &File, _path: &Path) -> Option<Self> {
+    pub(super) fn from_open_file(file: &File) -> Option<Self> {
         let metadata = file.metadata().ok()?;
         if !metadata.file_type().is_file() {
             return None;
@@ -53,15 +105,17 @@ impl DatabaseIdentity {
         }
         #[cfg(windows)]
         {
-            use std::os::windows::fs::MetadataExt;
-
-            Some(Self::File {
-                volume: metadata.volume_serial_number(),
-                index: metadata.file_index(),
-            })
+            let (volume, index) = windows_file_identity(file.as_raw_handle())?;
+            Some(Self::File { volume, index })
         }
         #[cfg(not(any(unix, windows)))]
         None
+    }
+
+    #[cfg(windows)]
+    pub(super) fn from_windows_handle(handle: *mut c_void) -> Option<Self> {
+        let (volume, index) = windows_file_identity(handle)?;
+        Some(Self::File { volume, index })
     }
 
     pub(super) fn session_key(&self, session_id: &str) -> String {
@@ -169,7 +223,7 @@ fn add_opened_state_db_path(
     seen: &mut HashSet<DatabaseIdentity>,
     paths: &mut Vec<HermesStateDbPath>,
 ) {
-    let Some(database_identity) = DatabaseIdentity::from_open_file(&file, path) else {
+    let Some(database_identity) = DatabaseIdentity::from_open_file(&file) else {
         return;
     };
     if seen.insert(database_identity.clone()) {
@@ -615,5 +669,20 @@ mod tests {
                 fixture.path(".hermes/profiles/real/state.db"),
             ]
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn derives_the_same_identity_from_opened_hard_links() {
+        let fixture = fs_fixture!({ "original.db": "" });
+        let original = fixture.path("original.db");
+        let alias = fixture.path("alias.db");
+        fs::hard_link(&original, &alias).unwrap();
+
+        let original_identity = DatabaseIdentity::from_open_file(&File::open(original).unwrap());
+        let alias_identity = DatabaseIdentity::from_open_file(&File::open(alias).unwrap());
+
+        assert!(original_identity.is_some());
+        assert_eq!(original_identity, alias_identity);
     }
 }

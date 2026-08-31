@@ -9,15 +9,15 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(windows)]
-use std::os::windows::io::FromRawHandle;
-
 use crate::{LoadedEntry, PricingMap, Result, cli::SharedArgs, read_files_parallel};
 
 use super::{
     parser::{HermesEntry, SessionRow, read_session_row, to_loaded_entry},
     paths::{file_matches_path, hermes_state_db_paths, is_regular_non_symlink},
 };
+
+#[cfg(windows)]
+use super::paths::DatabaseIdentity;
 
 const SESSION_QUERY: &str = "
     SELECT
@@ -62,26 +62,6 @@ struct UnixSqliteFile {
     _vfs: *mut sqlite::ffi::sqlite3_vfs,
     _inode: *mut c_void,
     fd: c_int,
-}
-
-#[cfg(windows)]
-const DUPLICATE_SAME_ACCESS: u32 = 0x0000_0002;
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    #[link_name = "GetCurrentProcess"]
-    fn get_current_process() -> *mut c_void;
-    #[link_name = "DuplicateHandle"]
-    fn duplicate_handle(
-        source_process_handle: *mut c_void,
-        source_handle: *mut c_void,
-        target_process_handle: *mut c_void,
-        target_handle: *mut *mut c_void,
-        desired_access: u32,
-        inherit_handle: i32,
-        options: u32,
-    ) -> i32;
 }
 
 impl SqliteConnection {
@@ -137,6 +117,7 @@ impl SqliteConnection {
         }
     }
 
+    #[cfg(unix)]
     fn main_file_pointer(&self) -> Option<*mut sqlite::ffi::sqlite3_file> {
         let mut file: *mut sqlite::ffi::sqlite3_file = ptr::null_mut();
         self.file_control(
@@ -147,6 +128,7 @@ impl SqliteConnection {
         .filter(|file| !file.is_null())
     }
 
+    #[cfg(unix)]
     fn has_not_moved(&self) -> bool {
         let mut moved = 0;
         self.file_control(
@@ -156,14 +138,14 @@ impl SqliteConnection {
     }
 
     fn matches_open_file(&self) -> bool {
-        if !self.has_not_moved() {
-            return false;
-        }
-        let Some(file_pointer) = self.main_file_pointer() else {
-            return false;
-        };
         #[cfg(unix)]
         {
+            if !self.has_not_moved() {
+                return false;
+            }
+            let Some(file_pointer) = self.main_file_pointer() else {
+                return false;
+            };
             // The bundled Unix VFS stores the descriptor after sqlite3_file's public prefix.
             let sqlite_file = unsafe { &*file_pointer.cast::<UnixSqliteFile>() };
             if sqlite_file.fd < 0 {
@@ -191,33 +173,14 @@ impl SqliteConnection {
             {
                 return false;
             }
-            let process = unsafe { get_current_process() };
-            let mut duplicate = ptr::null_mut();
-            let duplicated = unsafe {
-                duplicate_handle(
-                    process,
-                    handle,
-                    process,
-                    &mut duplicate,
-                    0,
-                    0,
-                    DUPLICATE_SAME_ACCESS,
-                )
-            };
-            if duplicated == 0 || duplicate.is_null() {
-                return false;
-            }
-            let sqlite_file = unsafe { File::from_raw_handle(duplicate) };
-            let Ok(sqlite_metadata) = sqlite_file.metadata() else {
+            let Some(sqlite_identity) = DatabaseIdentity::from_windows_handle(handle) else {
                 return false;
             };
-            let Ok(file_metadata) = self._file.metadata() else {
+            let Some(opened_identity) = DatabaseIdentity::from_open_file(self._file.as_ref())
+            else {
                 return false;
             };
-            use std::os::windows::fs::MetadataExt;
-
-            sqlite_metadata.volume_serial_number() == file_metadata.volume_serial_number()
-                && sqlite_metadata.file_index() == file_metadata.file_index()
+            sqlite_identity == opened_identity
         }
         #[cfg(not(any(unix, windows)))]
         {
