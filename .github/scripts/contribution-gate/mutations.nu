@@ -273,8 +273,9 @@ def report-failure [
 export def issue-verdict []: nothing -> nothing {
     let repo = repository
     let number = issue-number
-    require-open-issue | ignore
+    let issue = require-open-issue
     let close_allowed = (required-env CLOSE_ALLOWED) == 'true'
+    let protected_from_close = $issue.protected_from_close
     let force_implementation = (optional-env FORCE_IMPLEMENTATION 'false') == 'true'
     let outcome = optional-env JUDGE_OUTCOME failure
     let result = optional-env RESULT ''
@@ -287,9 +288,9 @@ export def issue-verdict []: nothing -> nothing {
 
     let verdict = (try {
         if $force_implementation {
-            issue-verdict-record $result $close_allowed --force-implementation
+            issue-verdict-record $result $close_allowed $protected_from_close --force-implementation
         } else {
-            issue-verdict-record $result $close_allowed
+            issue-verdict-record $result $close_allowed $protected_from_close
         }
     } catch { null })
     if $verdict == null {

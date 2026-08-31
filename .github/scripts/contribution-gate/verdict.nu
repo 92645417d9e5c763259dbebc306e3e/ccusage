@@ -9,6 +9,12 @@ const ISSUE_KINDS = [
     other
 ]
 
+const AUTO_IMPLEMENTATION_KINDS = [
+    supported_behavior_bug
+    maintenance
+    documentation
+]
+
 def parse-required-enum [verdict: record, field: string, allowed: list<string>]: nothing -> string {
     let value = $verdict | get --optional $field
     if ($value | describe) != 'string' or not ($value in $allowed) {
@@ -41,7 +47,12 @@ def parse-result [result: string]: nothing -> record {
     }
 }
 
-export def issue-verdict-record [result: string, close_allowed: bool, --force-implementation]: nothing -> record {
+export def issue-verdict-record [
+    result: string
+    close_allowed: bool
+    protected_from_close: bool = false
+    --force-implementation
+]: nothing -> record {
     let raw = parse-result $result
     let decision = parse-required-enum $raw decision [keep_open close needs_human]
     let priority = parse-required-enum $raw priority $PRIORITY_LABELS
@@ -68,11 +79,31 @@ export def issue-verdict-record [result: string, close_allowed: bool, --force-im
         | update priority 'priority:low'
         | update implementation none
         | update reason $"This is a new optional capability rather than a bug or regression in currently supported behavior. ($reason)"
+    } else if $issue_kind == 'security' {
+        $verdict
+        | update decision needs_human
+        | update implementation none
+        | update reason $"Security-sensitive reports always require maintainer review. ($reason)"
+    } else if $issue_kind == 'other' {
+        $verdict
+        | update decision needs_human
+        | update implementation none
+        | update reason $"This issue is outside the automatic implementation categories and requires maintainer review. ($reason)"
     } else if $decision == 'close' {
         $verdict
         | update decision needs_human
         | update implementation none
         | update reason $"Only new feature requests may be closed automatically; maintainer review is required for this issue. ($reason)"
+    } else {
+        $verdict
+    }
+
+    # A repository-controlled label protects known bugs and reviewed issues even if the model misclassifies them.
+    let verdict = if (not $force_implementation) and $protected_from_close and $verdict.decision == 'close' {
+        $verdict
+        | update decision needs_human
+        | update implementation none
+        | update reason $"Automatic closure is disabled by the issue's trusted labels; maintainer review is required. ($verdict.reason)"
     } else {
         $verdict
     }
@@ -86,7 +117,9 @@ export def issue-verdict-record [result: string, close_allowed: bool, --force-im
         $verdict
     }
 
-    let verdict = if (not $force_implementation) and (not $close_allowed) {
+    let verdict = if (not $force_implementation) and (not ($issue_kind in $AUTO_IMPLEMENTATION_KINDS)) {
+        $verdict | update implementation none
+    } else if (not $force_implementation) and (not $close_allowed) {
         $verdict | update implementation none
     } else if (not $force_implementation) and (($verdict.decision != 'keep_open') or (not ($verdict.priority in $IMPLEMENTATION_PRIORITIES))) {
         $verdict

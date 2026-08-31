@@ -466,7 +466,40 @@ def test-issue-context []: nothing -> nothing {
             state: open
             user: {login: alice id: 99}
         }
-    ) {number: 42, author: alice, author_id: 99}
+    ) {
+        number: 42
+        author: alice
+        author_id: 99
+        protected_from_close: false
+    }
+
+    expect 'protects a bug label from automatic closure' (
+        issue-context-record 42 {
+            number: 42
+            state: open
+            user: {login: alice id: 99}
+            labels: [{name: bug}]
+        }
+    ) {
+        number: 42
+        author: alice
+        author_id: 99
+        protected_from_close: true
+    }
+
+    expect 'does not treat a generic enhancement label as closure protection' (
+        issue-context-record 42 {
+            number: 42
+            state: open
+            user: {login: alice id: 99}
+            labels: [enhancement]
+        }
+    ) {
+        number: 42
+        author: alice
+        author_id: 99
+        protected_from_close: false
+    }
 
     let invalid_records = [
         {
@@ -596,6 +629,17 @@ def test-issue-product-scope-policy []: nothing -> nothing {
         $protected_feature.triage_label
     ) 'triage:needs-review'
 
+    let labeled_feature = issue-verdict-record $feature true true
+    expect 'does not close an issue protected by a trusted label' (
+        $labeled_feature.decision
+    ) needs_human
+    expect 'does not implement an issue protected from closure' (
+        $labeled_feature.implementation
+    ) none
+    expect 'marks a trusted-label conflict for maintainer review' (
+        $labeled_feature.triage_label
+    ) 'triage:needs-review'
+
     let regression = '{"decision":"keep_open","priority":"priority:high","implementation":"create_pr","issue_kind":"supported_behavior_bug","reason":"A documented timezone option no longer works."}'
     let regression_verdict = issue-verdict-record $regression true
     (expect
@@ -628,13 +672,25 @@ def test-issue-product-scope-policy []: nothing -> nothing {
         $security_verdict.triage_label
     ) 'triage:needs-review'
 
-    let other = '{"decision":"close","priority":"priority:low","implementation":"none","issue_kind":"other","reason":"The report appears to be a duplicate."}'
+    let security_implementation = '{"decision":"keep_open","priority":"priority:critical","implementation":"create_pr","issue_kind":"security","reason":"A sensitive path may expose credentials."}'
+    let security_implementation_verdict = issue-verdict-record $security_implementation true
+    expect 'does not automatically implement a security report' (
+        $security_implementation_verdict.implementation
+    ) none
+    expect 'always sends security reports to maintainer review' (
+        $security_implementation_verdict.decision
+    ) needs_human
+
+    let other = '{"decision":"keep_open","priority":"priority:high","implementation":"create_pr","issue_kind":"other","reason":"The report appears to be a support request."}'
     let other_verdict = issue-verdict-record $other true
     (expect
         'does not automatically close a non-feature issue'
         $other_verdict.decision
         needs_human
     )
+    expect 'does not automatically implement an uncategorized issue' (
+        $other_verdict.implementation
+    ) none
 
     let forced_verdict = issue-verdict-record $feature false --force-implementation
     expect 'lets an explicit implementation request override feature scope' (

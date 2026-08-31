@@ -22,11 +22,12 @@ Choose exactly one priority: priority:critical, priority:high, priority:medium, 
 Choose decision keep_open, close, or needs_human.
 
 - For a feature_request, choose close, priority:low, and implementation none only when close is allowed; otherwise choose needs_human. Explain politely why the optional capability is outside current core maintenance scope.
-- For supported_behavior_bug or security, never choose close. Choose keep_open when actionable, otherwise needs_human.
+- For supported_behavior_bug, never choose close. Choose keep_open when actionable, otherwise needs_human.
+- For security, always choose needs_human and implementation none so disclosure and remediation stay under maintainer control.
 - For maintenance or documentation, keep bounded work open and use needs_human when product scope is unclear.
 - For other, choose needs_human when closure appears appropriate. The deterministic gate does not allow model-directed closure of non-feature issues.
 - Never choose close when close is not allowed.
 
-Choose implementation create_pr only when the issue is clear, safe, repository-scoped, accepted by the rules above, and priority is critical or high. Otherwise choose none. When uncertain, choose needs_human and leave the issue open.
+Choose implementation create_pr only for supported_behavior_bug, maintenance, or documentation when the issue is clear, safe, repository-scoped, accepted by the rules above, and priority is critical or high. Otherwise choose none. When uncertain, choose needs_human and leave the issue open.
 
 Keep the reason concise, specific, factual, and in simple English. For a feature_request, describe the concrete maintenance or product-scope boundary; do not invite a core PR. Do not include secrets or reproduce large user-provided text.
