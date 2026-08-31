@@ -471,6 +471,7 @@ def test-issue-context []: nothing -> nothing {
         author: alice
         author_id: 99
         protected_from_close: false
+        implementation_blocked: false
     }
 
     expect 'protects a bug label from automatic closure' (
@@ -485,6 +486,7 @@ def test-issue-context []: nothing -> nothing {
         author: alice
         author_id: 99
         protected_from_close: true
+        implementation_blocked: false
     }
 
     expect 'does not treat a generic enhancement label as closure protection' (
@@ -499,6 +501,22 @@ def test-issue-context []: nothing -> nothing {
         author: alice
         author_id: 99
         protected_from_close: false
+        implementation_blocked: false
+    }
+
+    expect 'blocks automatic implementation for a security label' (
+        issue-context-record 42 {
+            number: 42
+            state: open
+            user: {login: alice id: 99}
+            labels: [{name: security}]
+        }
+    ) {
+        number: 42
+        author: alice
+        author_id: 99
+        protected_from_close: true
+        implementation_blocked: true
     }
 
     let invalid_records = [
@@ -653,6 +671,14 @@ def test-issue-product-scope-policy []: nothing -> nothing {
     expect 'marks an accepted regression as maintainable' (
         $regression_verdict.triage_label
     ) 'triage:maintainable'
+
+    let mislabeled_security = issue-verdict-record $regression true true true
+    expect 'blocks implementation when trusted labels conflict with the model kind' (
+        $mislabeled_security.implementation
+    ) none
+    expect 'sends an implementation-blocking label conflict to maintainer review' (
+        $mislabeled_security.decision
+    ) needs_human
 
     let unsafe_regression = '{"decision":"close","priority":"priority:high","implementation":"none","issue_kind":"supported_behavior_bug","reason":"The report appears difficult to reproduce."}'
     let unsafe_regression_verdict = issue-verdict-record $unsafe_regression true

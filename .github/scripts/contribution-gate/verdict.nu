@@ -51,6 +51,7 @@ export def issue-verdict-record [
     result: string
     close_allowed: bool
     protected_from_close: bool = false
+    implementation_blocked: bool = false
     --force-implementation
 ]: nothing -> record {
     let raw = parse-result $result
@@ -104,6 +105,15 @@ export def issue-verdict-record [
         | update decision needs_human
         | update implementation none
         | update reason $"Automatic closure is disabled by the issue's trusted labels; maintainer review is required. ($verdict.reason)"
+    } else {
+        $verdict
+    }
+
+    let verdict = if (not $force_implementation) and $implementation_blocked {
+        $verdict
+        | update decision needs_human
+        | update implementation none
+        | update reason $"Automatic implementation is disabled by the issue's trusted labels; maintainer review is required. ($verdict.reason)"
     } else {
         $verdict
     }

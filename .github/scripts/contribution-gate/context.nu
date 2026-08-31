@@ -7,6 +7,11 @@ const PROTECTED_FROM_CLOSE_LABELS = [
     'triage:needs-review'
 ]
 
+const IMPLEMENTATION_BLOCKING_LABELS = [
+    security
+    'triage:needs-review'
+]
+
 def issue-label-names [issue: record]: nothing -> list<string> {
     $issue
     | get --optional labels
@@ -52,12 +57,17 @@ export def issue-context-record [requested_number: int, issue: record]: nothing 
         issue-label-names $issue
         | any {|label| $label in $PROTECTED_FROM_CLOSE_LABELS }
     )
+    let implementation_blocked = (
+        issue-label-names $issue
+        | any {|label| $label in $IMPLEMENTATION_BLOCKING_LABELS }
+    )
 
     {
         number: $actual_number
         author: $author
         author_id: $author_id
         protected_from_close: $protected_from_close
+        implementation_blocked: $implementation_blocked
     }
 }
 

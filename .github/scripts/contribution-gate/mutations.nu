@@ -47,7 +47,12 @@ def ensure-gate-labels [repo: string]: nothing -> nothing {
     | ignore
 }
 
-def apply-triage-label [repo: string, number: int, triage_label]: nothing -> nothing {
+def apply-triage-label [
+    repo: string
+    number: int
+    triage_label
+    --preserve-protected
+]: nothing -> nothing {
     let labels = (
         gh-api-json [
             '--paginate'
@@ -71,7 +76,11 @@ def apply-triage-label [repo: string, number: int, triage_label]: nothing -> not
     $labels
     | where {|label|
         let name = $label | get --optional name
-        ($name in $TRIAGE_LABELS) and $name != $triage_label
+        let protected = (
+            $preserve_protected
+            and ($name in ['triage:maintainable' 'triage:needs-review'])
+        )
+        ($name in $TRIAGE_LABELS) and $name != $triage_label and not $protected
     }
     | each {|label|
         require-open-issue | ignore
@@ -202,12 +211,16 @@ export def upsert-comment [
     }
 }
 
-def close-issue [repo: string, number: int]: nothing -> nothing {
-    require-open-issue | ignore
+def close-issue [repo: string, number: int]: nothing -> bool {
+    let issue = require-open-issue
+    if $issue.protected_from_close {
+        return false
+    }
     gh-api-body PATCH $"repos/($repo)/issues/($number)" {
         state: closed
         state_reason: not_planned
     } | ignore
+    true
 }
 
 def close-pr [repo: string, number: int]: nothing -> nothing {
@@ -276,6 +289,7 @@ export def issue-verdict []: nothing -> nothing {
     let issue = require-open-issue
     let close_allowed = (required-env CLOSE_ALLOWED) == 'true'
     let protected_from_close = $issue.protected_from_close
+    let implementation_blocked = $issue.implementation_blocked
     let force_implementation = (optional-env FORCE_IMPLEMENTATION 'false') == 'true'
     let outcome = optional-env JUDGE_OUTCOME failure
     let result = optional-env RESULT ''
@@ -288,9 +302,9 @@ export def issue-verdict []: nothing -> nothing {
 
     let verdict = (try {
         if $force_implementation {
-            issue-verdict-record $result $close_allowed $protected_from_close --force-implementation
+            issue-verdict-record $result $close_allowed $protected_from_close $implementation_blocked --force-implementation
         } else {
-            issue-verdict-record $result $close_allowed $protected_from_close
+            issue-verdict-record $result $close_allowed $protected_from_close $implementation_blocked
         }
     } catch { null })
     if $verdict == null {
@@ -301,15 +315,37 @@ export def issue-verdict []: nothing -> nothing {
 
     ensure-gate-labels $repo
     apply-priority-label $repo $number $verdict.priority
-    apply-triage-label $repo $number $verdict.triage_label
-    upsert-comment $repo $number (issue-comment $verdict) --require-open-issue
-    if $verdict.decision == 'close' and $close_allowed {
-        close-issue $repo $number
+    if $verdict.decision == 'close' {
+        apply-triage-label $repo $number $verdict.triage_label --preserve-protected
+    } else {
+        apply-triage-label $repo $number $verdict.triage_label
     }
-    write-output decision $verdict.decision
-    write-output priority $verdict.priority
-    write-output reason $verdict.reason
-    write-output implementation $verdict.implementation
+    upsert-comment $repo $number (issue-comment $verdict) --require-open-issue
+
+    let final_verdict = if $verdict.decision == 'close' and $close_allowed {
+        if (close-issue $repo $number) {
+            $verdict
+        } else {
+            let current_issue = require-open-issue
+            let protected_verdict = (
+                issue-verdict-record
+                    $result
+                    $close_allowed
+                    $current_issue.protected_from_close
+                    $current_issue.implementation_blocked
+            )
+            apply-priority-label $repo $number $protected_verdict.priority
+            apply-triage-label $repo $number $protected_verdict.triage_label
+            upsert-comment $repo $number (issue-comment $protected_verdict) --require-open-issue
+            $protected_verdict
+        }
+    } else {
+        $verdict
+    }
+    write-output decision $final_verdict.decision
+    write-output priority $final_verdict.priority
+    write-output reason $final_verdict.reason
+    write-output implementation $final_verdict.implementation
 }
 
 export def pr-verdict []: nothing -> nothing {
