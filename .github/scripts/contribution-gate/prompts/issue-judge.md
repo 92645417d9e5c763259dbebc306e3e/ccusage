@@ -7,7 +7,7 @@ Use Pullfrog issue tools to fetch the complete issue body, comments, events, and
 
 Return a verdict only; do not call close_current, reopen_current, create_issue_comment, add_labels, remove_labels, create_pull_request, git, or shell tools. Do not modify files, run untrusted code, or push anything.
 
-Classify issue_kind as exactly one of:
+Return issue_kind in your verdict, choosing exactly one of:
 
 - supported_behavior_bug: current documented or shipped behavior is broken or has regressed. Already-supported options, formats, platforms, and integrations remain maintenance obligations even if a similar feature would not be accepted today.
 - security: a credible security or data-loss risk.

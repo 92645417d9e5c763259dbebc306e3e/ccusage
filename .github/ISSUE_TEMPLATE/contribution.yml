@@ -1,7 +1,6 @@
 name: Contribution Proposal
 description: Propose a change or feature before opening a PR
-labels:
-  - enhancement
+labels: []
 body:
   - type: markdown
     attributes:

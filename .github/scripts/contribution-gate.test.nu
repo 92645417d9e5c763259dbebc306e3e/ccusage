@@ -624,6 +624,9 @@ def test-issue-product-scope-policy []: nothing -> nothing {
     expect 'does not automatically close a security report' (
         $security_verdict.decision
     ) needs_human
+    expect 'marks a security report for maintainer review' (
+        $security_verdict.triage_label
+    ) 'triage:needs-review'
 
     let other = '{"decision":"close","priority":"priority:low","implementation":"none","issue_kind":"other","reason":"The report appears to be a duplicate."}'
     let other_verdict = issue-verdict-record $other true
