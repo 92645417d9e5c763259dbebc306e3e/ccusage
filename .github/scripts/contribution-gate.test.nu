@@ -2,7 +2,7 @@
 #! nix shell --inputs-from ../.. nixpkgs#nushell --command nu
 
 use ./contribution-gate/coauthor.nu [coauthor-validation]
-use ./contribution-gate/context.nu [issue-context-record]
+use ./contribution-gate/context.nu [issue-context-record issue-protection-record]
 use ./contribution-gate/core.nu [parse-issue-number]
 use ./contribution-gate/mutations.nu [is-contribution-gate-comment issue-comment]
 use ./contribution-gate/verdict.nu [issue-verdict-record]
@@ -460,6 +460,12 @@ def test-implementation-publication []: nothing -> nothing {
 }
 
 def test-issue-context []: nothing -> nothing {
+    expect 'derives independent closure and implementation protection' (
+        issue-protection-record {
+            labels: [{name: bug} {name: security}]
+        }
+    ) {protected_from_close: true, implementation_blocked: true}
+
     expect 'normalizes an open issue' (
         issue-context-record 42 {
             number: 42

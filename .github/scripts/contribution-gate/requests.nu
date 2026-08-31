@@ -570,6 +570,13 @@ export def issue-implementation-guard []: nothing -> nothing {
     }
     let existing = existing-issue-pull-request $repo $issue.number
     if $existing == null {
+        let final_issue = require-open-issue
+        if (not $force_implementation) and $final_issue.implementation_blocked {
+            let body = comment-body $COMMENT_MARKER 'Automatic implementation was stopped because a trusted security or maintainer-review label requires explicit maintainer approval.'
+            upsert-comment $repo $final_issue.number $body --require-open-issue
+            write-output skip 'true'
+            return
+        }
         write-output skip 'false'
         return
     }

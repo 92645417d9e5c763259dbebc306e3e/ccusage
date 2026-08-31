@@ -14,7 +14,7 @@ use ./core.nu [
     required-env
     write-output
 ]
-use ./context.nu [require-open-issue]
+use ./context.nu [issue-protection-record require-open-issue]
 use ./verdict.nu [issue-verdict-record pr-verdict-record]
 
 def ensure-label [repo: string, label: string, color: string]: nothing -> nothing {
@@ -223,6 +223,30 @@ def close-issue [repo: string, number: int]: nothing -> bool {
     true
 }
 
+export def restore-protected-issue []: nothing -> nothing {
+    let repo = repository
+    let number = issue-number
+    let issue = gh-api-json [$"repos/($repo)/issues/($number)"]
+    let protection = issue-protection-record $issue
+    let closed_by = $issue | get --optional closed_by.login
+    let should_restore = (
+        $protection.protected_from_close
+        and (($issue | get --optional state) == 'closed')
+        and (($issue | get --optional state_reason) == 'not_planned')
+        and $closed_by == 'github-actions[bot]'
+    )
+    if not $should_restore {
+        return
+    }
+
+    # GitHub cannot condition a close PATCH on labels, so this serialized label event repairs the final API race.
+    gh-api-body PATCH $"repos/($repo)/issues/($number)" {state: open} | ignore
+    ensure-gate-labels $repo
+    apply-triage-label $repo $number 'triage:needs-review' --preserve-protected
+    let body = comment-body $COMMENT_MARKER 'A trusted bug, security, or maintainer-review label was added during automatic closure. The issue was reopened for maintainer review.'
+    upsert-comment $repo $number $body --require-open-issue
+}
+
 def close-pr [repo: string, number: int]: nothing -> nothing {
     gh-api-body PATCH $"repos/($repo)/pulls/($number)" {state: closed} | ignore
 }
@@ -335,7 +359,7 @@ export def issue-verdict []: nothing -> nothing {
                     $current_issue.implementation_blocked
             )
             apply-priority-label $repo $number $protected_verdict.priority
-            apply-triage-label $repo $number $protected_verdict.triage_label
+            apply-triage-label $repo $number $protected_verdict.triage_label --preserve-protected
             upsert-comment $repo $number (issue-comment $protected_verdict) --require-open-issue
             $protected_verdict
         }

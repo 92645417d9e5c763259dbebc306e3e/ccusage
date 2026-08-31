@@ -4,6 +4,7 @@ on:
   issues:
     types:
       - opened
+      - labeled
   workflow_dispatch:
     inputs:
       issue_number:
@@ -26,7 +27,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  restore-protected:
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.action == 'labeled' &&
+      (github.event.label.name == 'bug' ||
+       github.event.label.name == 'security' ||
+       github.event.label.name == 'triage:maintainable' ||
+       github.event.label.name == 'triage:needs-review')
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout the base repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Nushell
+        uses: hustcer/setup-nu@9215c80adb545a85c419d5085b76eb6d082f49e7 # v3.27
+        with:
+          version: 0.114.1
+
+      - name: Restore an issue protected during automatic closure
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: nu .github/scripts/contribution-gate.nu restore-protected-issue
+
   triage:
+    if: github.event_name == 'workflow_dispatch' || github.event.action == 'opened'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
