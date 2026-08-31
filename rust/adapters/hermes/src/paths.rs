@@ -89,7 +89,7 @@ pub(super) enum DatabaseIdentity {
 }
 
 impl DatabaseIdentity {
-    pub(super) fn from_open_file(file: &File) -> Option<Self> {
+    fn from_open_file(file: &File) -> Option<Self> {
         let metadata = file.metadata().ok()?;
         if !metadata.file_type().is_file() {
             return None;

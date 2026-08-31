@@ -17,6 +17,9 @@ use super::{
 };
 
 #[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
+
+#[cfg(windows)]
 use super::paths::DatabaseIdentity;
 
 const SESSION_QUERY: &str = "
@@ -176,7 +179,8 @@ impl SqliteConnection {
             let Some(sqlite_identity) = DatabaseIdentity::from_windows_handle(handle) else {
                 return false;
             };
-            let Some(opened_identity) = DatabaseIdentity::from_open_file(self._file.as_ref())
+            let Some(opened_identity) =
+                DatabaseIdentity::from_windows_handle(self._file.as_raw_handle())
             else {
                 return false;
             };
