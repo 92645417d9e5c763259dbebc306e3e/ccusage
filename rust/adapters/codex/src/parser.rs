@@ -11,7 +11,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
-    CodexRawUsage, CodexServiceTier, CodexTokenUsageEvent, Result, TimestampMs, parse_ts_timestamp,
+    CodexRawUsage, CodexServiceTier, CodexTokenUsageEvent, CodexWeeklyRateLimitObservation, Result,
+    TimestampMs, parse_ts_timestamp,
 };
 
 use super::types::{
@@ -159,6 +160,22 @@ pub(super) fn visit_codex_session_file(
     replayed_prefix: Option<&[CodexRawUsage]>,
     mut visit: impl FnMut(CodexTokenUsageEvent) -> Result<()>,
 ) -> Result<()> {
+    visit_codex_session_file_with_weekly_limits(
+        sessions_dir,
+        path,
+        replayed_prefix,
+        &mut visit,
+        |_| Ok(()),
+    )
+}
+
+pub(super) fn visit_codex_session_file_with_weekly_limits(
+    sessions_dir: &Path,
+    path: &Path,
+    replayed_prefix: Option<&[CodexRawUsage]>,
+    mut visit: impl FnMut(CodexTokenUsageEvent) -> Result<()>,
+    mut visit_weekly_limit: impl FnMut(CodexWeeklyRateLimitObservation) -> Result<()>,
+) -> Result<()> {
     let Ok(file) = fs::File::open(path) else {
         return Ok(());
     };
@@ -174,52 +191,59 @@ pub(super) fn visit_codex_session_file(
         Some(prefix) => CodexReplayState::MatchingParent { prefix, index: 0 },
         None => CodexReplayState::Done,
     };
-    let mut visit_filtered = |event: CodexTokenUsageEvent| {
-        // Each arm either returns or advances the state toward `Done`, so this
-        // loop only re-runs to apply the event to the state it switched to.
-        loop {
-            match replay {
-                CodexReplayState::MatchingParent { prefix, index } => {
-                    let usage = CodexRawUsage {
-                        input_tokens: event.input_tokens,
-                        cached_input_tokens: event.cached_input_tokens,
-                        cache_creation_tokens: event.cache_creation_tokens,
-                        output_tokens: event.output_tokens,
-                        reasoning_output_tokens: event.reasoning_output_tokens,
-                        total_tokens: event.total_tokens,
-                    };
-                    if prefix.get(index) == Some(&usage) {
-                        replay = CodexReplayState::MatchingParent {
-                            prefix,
-                            index: index + 1,
+    let mut visit_filtered =
+        |event: CodexTokenUsageEvent, weekly_limit: Option<CodexWeeklyRateLimitObservation>| {
+            // Each arm either returns or advances the state toward `Done`, so this
+            // loop only re-runs to apply the event to the state it switched to.
+            loop {
+                match replay {
+                    CodexReplayState::MatchingParent { prefix, index } => {
+                        let usage = CodexRawUsage {
+                            input_tokens: event.input_tokens,
+                            cached_input_tokens: event.cached_input_tokens,
+                            cache_creation_tokens: event.cache_creation_tokens,
+                            output_tokens: event.output_tokens,
+                            reasoning_output_tokens: event.reasoning_output_tokens,
+                            total_tokens: event.total_tokens,
                         };
+                        if prefix.get(index) == Some(&usage) {
+                            replay = CodexReplayState::MatchingParent {
+                                prefix,
+                                index: index + 1,
+                            };
+                            return Ok(());
+                        }
+                        // Nothing matched, so the parent stream cannot anchor this
+                        // replay: the log is unavailable, or Codex rewrote the copied
+                        // history. Fall back to the rewritten burst instead.
+                        replay = (index == 0)
+                            .then(|| detect_rewritten_burst(path))
+                            .flatten()
+                            .map_or(
+                                CodexReplayState::Done,
+                                CodexReplayState::SkippingRewrittenBurst,
+                            );
+                    }
+                    CodexReplayState::SkippingRewrittenBurst(previous) => {
+                        if let Some(timestamp) = parse_ts_timestamp(&event.timestamp)
+                            && (0..=CODEX_REWRITTEN_BURST_PAUSE_MS)
+                                .contains(&(timestamp.as_millis() - previous.as_millis()))
+                        {
+                            replay = CodexReplayState::SkippingRewrittenBurst(timestamp);
+                            return Ok(());
+                        }
+                        replay = CodexReplayState::Done;
+                    }
+                    CodexReplayState::Done => {
+                        visit(event)?;
+                        if let Some(weekly_limit) = weekly_limit {
+                            visit_weekly_limit(weekly_limit)?;
+                        }
                         return Ok(());
                     }
-                    // Nothing matched, so the parent stream cannot anchor this
-                    // replay: the log is unavailable, or Codex rewrote the copied
-                    // history. Fall back to the rewritten burst instead.
-                    replay = (index == 0)
-                        .then(|| detect_rewritten_burst(path))
-                        .flatten()
-                        .map_or(
-                            CodexReplayState::Done,
-                            CodexReplayState::SkippingRewrittenBurst,
-                        );
                 }
-                CodexReplayState::SkippingRewrittenBurst(previous) => {
-                    if let Some(timestamp) = parse_ts_timestamp(&event.timestamp)
-                        && (0..=CODEX_REWRITTEN_BURST_PAUSE_MS)
-                            .contains(&(timestamp.as_millis() - previous.as_millis()))
-                    {
-                        replay = CodexReplayState::SkippingRewrittenBurst(timestamp);
-                        return Ok(());
-                    }
-                    replay = CodexReplayState::Done;
-                }
-                CodexReplayState::Done => return visit(event),
             }
-        }
-    };
+        };
 
     loop {
         line.clear();
@@ -281,7 +305,7 @@ fn visit_codex_session_entry(
     current_model: &mut Option<String>,
     current_model_is_fallback: &mut bool,
     current_service_tier: &mut Option<CodexServiceTier>,
-    visit: &mut impl FnMut(CodexTokenUsageEvent) -> Result<()>,
+    visit: &mut impl FnMut(CodexTokenUsageEvent, Option<CodexWeeklyRateLimitObservation>) -> Result<()>,
 ) -> Result<()> {
     let entry_type = value.entry_type.as_deref();
     if entry_type == Some("turn_context") {
@@ -318,6 +342,7 @@ fn visit_codex_session_entry(
     if payload.payload_type.as_deref() != Some("token_count") {
         return Ok(());
     }
+    let weekly_limit = weekly_rate_limit_observation(&timestamp, payload);
     let info = payload.info.as_ref();
     let total_usage = info.and_then(|info| info.total_token_usage.as_ref().copied());
     let cumulative_advanced = total_usage
@@ -355,18 +380,35 @@ fn visit_codex_session_entry(
         current_model_is_fallback,
     );
 
-    visit(CodexTokenUsageEvent {
-        session_id: session_id.to_string(),
-        timestamp,
-        model,
-        input_tokens: raw_usage.input_tokens,
-        cached_input_tokens: raw_usage.cached_input_tokens,
-        cache_creation_tokens: raw_usage.cache_creation_tokens,
-        output_tokens: raw_usage.output_tokens,
-        reasoning_output_tokens: raw_usage.reasoning_output_tokens,
-        total_tokens: raw_usage.total_tokens,
-        is_fallback_model,
-        service_tier: *current_service_tier,
+    visit(
+        CodexTokenUsageEvent {
+            session_id: session_id.to_string(),
+            timestamp,
+            model,
+            input_tokens: raw_usage.input_tokens,
+            cached_input_tokens: raw_usage.cached_input_tokens,
+            cache_creation_tokens: raw_usage.cache_creation_tokens,
+            output_tokens: raw_usage.output_tokens,
+            reasoning_output_tokens: raw_usage.reasoning_output_tokens,
+            total_tokens: raw_usage.total_tokens,
+            is_fallback_model,
+            service_tier: *current_service_tier,
+        },
+        weekly_limit,
+    )
+}
+
+fn weekly_rate_limit_observation(
+    timestamp: &str,
+    payload: &CodexPayload<'_>,
+) -> Option<CodexWeeklyRateLimitObservation> {
+    let primary = payload.rate_limits.as_ref()?.primary.as_ref()?;
+    (primary.window_minutes == 10_080 && (0.0..=100.0).contains(&primary.used_percent)).then(|| {
+        CodexWeeklyRateLimitObservation {
+            timestamp: timestamp.to_string(),
+            used_percent: primary.used_percent,
+            resets_at: primary.resets_at,
+        }
     })
 }
 
@@ -376,7 +418,7 @@ fn add_codex_exec_event(
     fallback_timestamp: &str,
     current_model: &mut Option<String>,
     current_model_is_fallback: &mut bool,
-    visit: &mut impl FnMut(CodexTokenUsageEvent) -> Result<()>,
+    visit: &mut impl FnMut(CodexTokenUsageEvent, Option<CodexWeeklyRateLimitObservation>) -> Result<()>,
 ) -> Result<()> {
     let Some(raw_usage) = normalize_headless_codex_usage(value) else {
         return Ok(());
@@ -404,7 +446,7 @@ fn add_codex_exec_event_from_value(
     fallback_timestamp: &str,
     current_model: &mut Option<String>,
     current_model_is_fallback: &mut bool,
-    visit: &mut impl FnMut(CodexTokenUsageEvent) -> Result<()>,
+    visit: &mut impl FnMut(CodexTokenUsageEvent, Option<CodexWeeklyRateLimitObservation>) -> Result<()>,
 ) -> Result<()> {
     let Ok(value) = serde_json::from_slice::<Value>(line) else {
         return Ok(());
@@ -437,7 +479,7 @@ fn visit_codex_exec_usage_event(
     timestamps: CodexExecTimestamps,
     current_model: &mut Option<String>,
     current_model_is_fallback: &mut bool,
-    visit: &mut impl FnMut(CodexTokenUsageEvent) -> Result<()>,
+    visit: &mut impl FnMut(CodexTokenUsageEvent, Option<CodexWeeklyRateLimitObservation>) -> Result<()>,
 ) -> Result<()> {
     let raw_usage = normalize_codex_raw_usage(raw_usage);
     let (model, is_fallback_model) = resolve_codex_usage_model(
@@ -446,19 +488,22 @@ fn visit_codex_exec_usage_event(
         current_model,
         current_model_is_fallback,
     );
-    visit(CodexTokenUsageEvent {
-        session_id: session_id.to_string(),
-        timestamp: timestamps.event,
-        model,
-        input_tokens: raw_usage.input_tokens,
-        cached_input_tokens: raw_usage.cached_input_tokens,
-        cache_creation_tokens: raw_usage.cache_creation_tokens,
-        output_tokens: raw_usage.output_tokens,
-        reasoning_output_tokens: raw_usage.reasoning_output_tokens,
-        total_tokens: raw_usage.total_tokens,
-        is_fallback_model,
-        service_tier: None,
-    })
+    visit(
+        CodexTokenUsageEvent {
+            session_id: session_id.to_string(),
+            timestamp: timestamps.event,
+            model,
+            input_tokens: raw_usage.input_tokens,
+            cached_input_tokens: raw_usage.cached_input_tokens,
+            cache_creation_tokens: raw_usage.cache_creation_tokens,
+            output_tokens: raw_usage.output_tokens,
+            reasoning_output_tokens: raw_usage.reasoning_output_tokens,
+            total_tokens: raw_usage.total_tokens,
+            is_fallback_model,
+            service_tier: None,
+        },
+        None,
+    )
 }
 
 fn codex_service_tier(value: &str) -> Option<CodexServiceTier> {

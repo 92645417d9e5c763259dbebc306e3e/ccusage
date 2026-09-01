@@ -193,6 +193,21 @@ pub(super) struct CodexPayload<'a> {
         deserialize_with = "deserialize_optional_object_lossy"
     )]
     pub(super) thread_settings: Option<CodexThreadSettings<'a>>,
+    #[serde(default, deserialize_with = "deserialize_optional_object_lossy")]
+    pub(super) rate_limits: Option<CodexRateLimits>,
+}
+
+#[derive(Default, Deserialize)]
+pub(super) struct CodexRateLimits {
+    #[serde(default, deserialize_with = "deserialize_optional_object_lossy")]
+    pub(super) primary: Option<CodexRateLimitWindow>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CodexRateLimitWindow {
+    pub(super) used_percent: f64,
+    pub(super) window_minutes: u64,
+    pub(super) resets_at: i64,
 }
 
 #[derive(Deserialize)]
