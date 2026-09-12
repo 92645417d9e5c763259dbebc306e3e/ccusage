@@ -5,14 +5,15 @@ into the usage entries the reports render.
 
 ## Owns
 
-- `aggregate.rs` — grouping events into report periods, including cross-session dedupe.
-- `loader.rs` — reading the source, dedupe, and date filtering.
-- `parser.rs` — raw record parsing, token mapping, and model naming.
-- `paths.rs` — environment variables, default directories, and file discovery.
-- `replay.rs` — detecting history that a forked or subagent session replays.
-- `report.rs` — the JSON and table shapes where they differ from the shared ones.
-- `speed.rs` — resolving the service tier that priced each request.
-- `types.rs` — types that stay inside this adapter.
+- `aggregate.rs` - grouping events into report periods, including cross-session dedupe.
+- `loader.rs` - reading the source, dedupe, and date filtering.
+- `parser.rs` - raw record parsing, token mapping, and model naming.
+- `paths.rs` - environment variables, default directories, and file discovery.
+- `quota.rs` - recent weekly rate-limit episode segmentation and API-equivalent cost estimates.
+- `replay.rs` - detecting history that a forked or subagent session replays.
+- `report.rs` - the JSON and table shapes where they differ from the shared ones.
+- `speed.rs` - resolving the service tier that priced each request.
+- `types.rs` - types that stay inside this adapter.
 
 Anything that is not specific to this source belongs in `ccusage-core` or
 `ccusage-adapter-common` instead.
@@ -31,6 +32,7 @@ chunking, and ordered parallel reads.
 - `aggregate::aggregate_events`
 - `aggregate::filter_events_by_date`
 - `aggregate::load_groups`
+- `aggregate::load_daily_groups_with_weekly_quota_estimates`
 - `loader::load_codex_events_with_detection`
 - `loader::load_codex_events_from_directory`
 - `report::calculate_codex_model_cost`
@@ -45,6 +47,8 @@ chunking, and ordered parallel reads.
 - `types::CodexServiceTier`
 - `types::CodexTokenUsageEvent`
 - `types::CodexUsageBucket`
+- `quota::CodexDailyUsageWithQuotaEstimates`
+- `quota::CodexWeeklyQuotaEstimate`
 - `types::merge_codex_service_tiers`
 - `run`
 - `report_json`

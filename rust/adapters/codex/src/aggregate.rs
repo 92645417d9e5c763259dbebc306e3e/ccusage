@@ -11,14 +11,21 @@ use jiff::tz::TimeZone as JiffTimeZone;
 use rustc_hash::FxHasher;
 
 use crate::{
-    CodexGroup, CodexServiceTier, CodexTokenUsageEvent, CodexUsageBucket, Result,
+    CodexDailyUsageWithQuotaEstimates, CodexGroup, CodexServiceTier, CodexTokenUsageEvent,
+    CodexUsageBucket, CodexWeeklyRateLimitObservation, PricingMap, Result,
     cli::{AgentReportKind, SharedArgs, WeekDay},
     fast::FxHashMap,
     format_date_tz, merge_codex_service_tiers, parse_ts_timestamp, parse_tz, wants_json,
     week_start,
 };
 
-use super::{parser, paths, replay::CodexReplayPlan};
+use super::{
+    parser, paths,
+    quota::{estimate_weekly_quota_costs_from_timeline, recent_window_start_millis},
+    replay::CodexReplayPlan,
+    report::calculate_codex_usage_cost_at,
+    speed::CodexSpeedPolicy,
+};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct CodexEventKey {
@@ -49,6 +56,12 @@ struct CodexAggregation {
     seen: CodexDedupeMap,
 }
 
+#[derive(Default)]
+struct CodexGroupedData {
+    groups: BTreeMap<String, CodexGroup>,
+    weekly_rate_limits: Vec<CodexWeeklyRateLimitObservation>,
+}
+
 /// Read-only inputs every file of one aggregation run shares.
 struct CodexAggregateRun<'a> {
     sessions_dir: &'a Path,
@@ -56,6 +69,7 @@ struct CodexAggregateRun<'a> {
     shared: &'a SharedArgs,
     kind: AgentReportKind,
     replay_plan: &'a CodexReplayPlan,
+    weekly_limit_since_millis: Option<i64>,
 }
 
 pub fn load_groups(
@@ -74,6 +88,43 @@ fn load_groups_from_sources(
     shared: &SharedArgs,
     kind: AgentReportKind,
 ) -> Result<BTreeMap<String, CodexGroup>> {
+    let (mut data, seen) = load_grouped_data_from_sources(sources, shared, kind, None)?;
+    apply_recorded_usage_from_shards(&mut data.groups, &seen, shared, kind);
+    Ok(data.groups)
+}
+
+pub fn load_daily_groups_with_weekly_quota_estimates(
+    shared: &SharedArgs,
+    pricing: &PricingMap,
+    speed: CodexSpeedPolicy,
+    now_millis: i64,
+) -> Result<CodexDailyUsageWithQuotaEstimates> {
+    let sources = paths::codex_usage_sources()?;
+    let (mut data, seen) = load_grouped_data_from_sources(
+        &sources,
+        shared,
+        AgentReportKind::Daily,
+        Some(recent_window_start_millis(now_millis)),
+    )?;
+    apply_recorded_usage_from_shards(&mut data.groups, &seen, shared, AgentReportKind::Daily);
+    dedupe_weekly_rate_limits(&mut data.weekly_rate_limits);
+    let costs = quota_costs_from_shards(&seen, pricing, speed, now_millis);
+    let weekly_rate_limit_samples = data.weekly_rate_limits.len();
+    let weekly_quota_estimates =
+        estimate_weekly_quota_costs_from_timeline(&costs, &data.weekly_rate_limits, now_millis);
+    Ok(CodexDailyUsageWithQuotaEstimates {
+        groups: data.groups,
+        weekly_rate_limit_samples,
+        weekly_quota_estimates,
+    })
+}
+
+fn load_grouped_data_from_sources(
+    sources: &[paths::CodexUsageSource],
+    shared: &SharedArgs,
+    kind: AgentReportKind,
+    weekly_limit_since_millis: Option<i64>,
+) -> Result<(CodexGroupedData, Vec<Mutex<CodexDedupeMap>>)> {
     let file_groups = paths::collect_deduped_codex_usage_files(sources);
     let files_by_group = file_groups
         .iter()
@@ -98,14 +149,14 @@ fn load_groups_from_sources(
             shared.single_thread,
         )
     };
-    let mut groups = BTreeMap::new();
+    let mut data = CodexGroupedData::default();
     let seen = create_dedupe_shards();
     for (group, files) in file_groups.iter().zip(&files_by_group) {
         if files.is_empty() {
             continue;
         }
-        merge_groups(
-            &mut groups,
+        merge_grouped_data(
+            &mut data,
             aggregate_files_with_dedupe(
                 &CodexAggregateRun {
                     sessions_dir: &group.dir,
@@ -113,13 +164,13 @@ fn load_groups_from_sources(
                     shared,
                     kind,
                     replay_plan: &replay_plan,
+                    weekly_limit_since_millis,
                 },
                 &seen,
             )?,
         );
     }
-    apply_recorded_usage_from_shards(&mut groups, &seen, shared, kind);
-    Ok(groups)
+    Ok((data, seen))
 }
 
 pub(super) fn load_groups_from_directory(
@@ -144,20 +195,21 @@ pub(super) fn load_groups_from_directory(
         shared,
         kind,
         replay_plan: &replay_plan,
+        weekly_limit_since_millis: None,
     };
     if shared.single_thread {
         return aggregate_files_local(&run);
     }
     let seen = create_dedupe_shards();
-    let mut groups = aggregate_files_parallel(&run, &seen)?;
-    apply_recorded_usage_from_shards(&mut groups, &seen, shared, kind);
-    Ok(groups)
+    let mut data = aggregate_files_parallel(&run, &seen)?;
+    apply_recorded_usage_from_shards(&mut data.groups, &seen, shared, kind);
+    Ok(data.groups)
 }
 
 fn aggregate_files_with_dedupe(
     run: &CodexAggregateRun<'_>,
     seen: &CodexDedupeShards,
-) -> Result<BTreeMap<String, CodexGroup>> {
+) -> Result<CodexGroupedData> {
     if run.shared.single_thread {
         return aggregate_files(run, seen);
     }
@@ -167,20 +219,20 @@ fn aggregate_files_with_dedupe(
 fn aggregate_files(
     run: &CodexAggregateRun<'_>,
     seen: &CodexDedupeShards,
-) -> Result<BTreeMap<String, CodexGroup>> {
-    let mut groups = BTreeMap::new();
+) -> Result<CodexGroupedData> {
+    let mut data = CodexGroupedData::default();
     let timezone =
         parse_tz(run.shared.timezone.as_deref()).or_else(|| Some(JiffTimeZone::system()));
     for file in run.files {
-        aggregate_file(run, file, timezone.as_ref(), seen, &mut groups)?;
+        aggregate_file(run, file, timezone.as_ref(), seen, &mut data)?;
     }
-    Ok(groups)
+    Ok(data)
 }
 
 fn aggregate_files_parallel(
     run: &CodexAggregateRun<'_>,
     seen: &CodexDedupeShards,
-) -> Result<BTreeMap<String, CodexGroup>> {
+) -> Result<CodexGroupedData> {
     let worker_count = thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
@@ -194,26 +246,26 @@ fn aggregate_files_parallel(
         let mut handles = Vec::with_capacity(chunks.len());
         for chunk in chunks {
             handles.push(scope.spawn(move || {
-                let mut groups = BTreeMap::new();
+                let mut data = CodexGroupedData::default();
                 let timezone = parse_tz(run.shared.timezone.as_deref())
                     .or_else(|| Some(JiffTimeZone::system()));
                 for index in chunk {
-                    aggregate_file(run, &run.files[index], timezone.as_ref(), seen, &mut groups)?;
+                    aggregate_file(run, &run.files[index], timezone.as_ref(), seen, &mut data)?;
                 }
-                Result::<BTreeMap<String, CodexGroup>>::Ok(groups)
+                Result::<CodexGroupedData>::Ok(data)
             }));
         }
 
-        let mut groups = BTreeMap::new();
+        let mut data = CodexGroupedData::default();
         for handle in handles {
-            merge_groups(
-                &mut groups,
+            merge_grouped_data(
+                &mut data,
                 handle
                     .join()
                     .map_err(|_| crate::cli_error("codex worker panicked"))??,
             );
         }
-        Ok(groups)
+        Ok(data)
     })
 }
 
@@ -222,13 +274,24 @@ fn aggregate_file(
     file: &Path,
     timezone: Option<&JiffTimeZone>,
     seen: &CodexDedupeShards,
-    groups: &mut BTreeMap<String, CodexGroup>,
+    data: &mut CodexGroupedData,
 ) -> Result<()> {
-    parser::visit_codex_session_file(
+    let groups = &mut data.groups;
+    let weekly_rate_limits = &mut data.weekly_rate_limits;
+    parser::visit_codex_session_file_with_weekly_limits(
         run.sessions_dir,
         file,
         run.replay_plan.replay_prefix(file),
         |event| add_event_to_groups(&event, run.kind, timezone, run.shared, seen, groups),
+        |observation| {
+            if run.weekly_limit_since_millis.is_none_or(|since| {
+                parse_ts_timestamp(&observation.timestamp)
+                    .is_some_and(|timestamp| timestamp.as_millis() >= since)
+            }) {
+                weekly_rate_limits.push(observation);
+            }
+            Ok(())
+        },
     )
 }
 
@@ -552,30 +615,7 @@ fn apply_recorded_usage_entries<'a>(
         let Some(model_usage) = group.models.get_mut(record.model.as_str()) else {
             continue;
         };
-        let is_long_context =
-            key.input_tokens > crate::pricing::long_context_split_threshold(record.model.as_str());
-        let usage = CodexUsageBucket {
-            input_tokens: key.input_tokens,
-            cached_input_tokens: key.cached_input_tokens,
-            cache_creation_tokens: key.cache_creation_tokens,
-            output_tokens: key.output_tokens,
-            long_context_input_tokens: if is_long_context { key.input_tokens } else { 0 },
-            long_context_cached_input_tokens: if is_long_context {
-                key.cached_input_tokens
-            } else {
-                0
-            },
-            long_context_cache_creation_tokens: if is_long_context {
-                key.cache_creation_tokens
-            } else {
-                0
-            },
-            long_context_output_tokens: if is_long_context {
-                key.output_tokens
-            } else {
-                0
-            },
-        };
+        let usage = codex_usage_bucket(key, record.model.as_str());
         merge_recorded_codex_usage(
             model_usage,
             record.model.as_str(),
@@ -584,6 +624,76 @@ fn apply_recorded_usage_entries<'a>(
             usage,
         );
     }
+}
+
+fn quota_costs_from_shards(
+    seen: &CodexDedupeShards,
+    pricing: &PricingMap,
+    speed: CodexSpeedPolicy,
+    now_millis: i64,
+) -> BTreeMap<i64, f64> {
+    let since_millis = recent_window_start_millis(now_millis);
+    let mut costs = BTreeMap::<i64, f64>::new();
+    for shard in seen {
+        let records = shard.lock().unwrap();
+        for (key, record) in records.iter() {
+            let timestamp = key.timestamp.as_millis();
+            if timestamp < since_millis || timestamp > now_millis {
+                continue;
+            }
+            let usage = codex_usage_bucket(key, record.model.as_str());
+            let cost = calculate_codex_usage_cost_at(
+                record.model.as_str(),
+                key.timestamp,
+                usage,
+                record.service_tier,
+                pricing,
+                speed,
+            );
+            *costs.entry(timestamp).or_default() += cost;
+        }
+    }
+    costs
+}
+
+fn codex_usage_bucket(key: &CodexEventKey, model: &str) -> CodexUsageBucket {
+    let is_long_context = key.input_tokens > crate::pricing::long_context_split_threshold(model);
+    CodexUsageBucket {
+        input_tokens: key.input_tokens,
+        cached_input_tokens: key.cached_input_tokens,
+        cache_creation_tokens: key.cache_creation_tokens,
+        output_tokens: key.output_tokens,
+        long_context_input_tokens: if is_long_context { key.input_tokens } else { 0 },
+        long_context_cached_input_tokens: if is_long_context {
+            key.cached_input_tokens
+        } else {
+            0
+        },
+        long_context_cache_creation_tokens: if is_long_context {
+            key.cache_creation_tokens
+        } else {
+            0
+        },
+        long_context_output_tokens: if is_long_context {
+            key.output_tokens
+        } else {
+            0
+        },
+    }
+}
+
+fn dedupe_weekly_rate_limits(observations: &mut Vec<CodexWeeklyRateLimitObservation>) {
+    observations.sort_by(|left, right| {
+        left.timestamp
+            .cmp(&right.timestamp)
+            .then_with(|| left.used_percent.total_cmp(&right.used_percent))
+            .then_with(|| left.resets_at.cmp(&right.resets_at))
+    });
+    observations.dedup_by(|left, right| {
+        left.timestamp == right.timestamp
+            && left.used_percent == right.used_percent
+            && left.resets_at == right.resets_at
+    });
 }
 
 fn create_dedupe_shards() -> Vec<Mutex<CodexDedupeMap>> {
@@ -692,6 +802,13 @@ fn merge_groups(target: &mut BTreeMap<String, CodexGroup>, source: BTreeMap<Stri
             merge_codex_model_usage(target_usage, usage);
         }
     }
+}
+
+fn merge_grouped_data(target: &mut CodexGroupedData, mut source: CodexGroupedData) {
+    merge_groups(&mut target.groups, source.groups);
+    target
+        .weekly_rate_limits
+        .append(&mut source.weekly_rate_limits);
 }
 
 fn merge_codex_model_usage(target: &mut crate::CodexModelUsage, source: crate::CodexModelUsage) {

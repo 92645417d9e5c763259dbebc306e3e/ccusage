@@ -5,6 +5,7 @@ mod aggregate;
 mod loader;
 mod parser;
 mod paths;
+mod quota;
 mod replay;
 mod report;
 mod speed;
@@ -12,10 +13,17 @@ mod types;
 
 use crate::{PricingMap, Result, cli::AgentCommandArgs, log_level, print_json_or_jq, wants_json};
 
-pub use aggregate::{aggregate_events, filter_events_by_date, load_groups};
+pub use aggregate::{
+    aggregate_events, filter_events_by_date, load_daily_groups_with_weekly_quota_estimates,
+    load_groups,
+};
 #[doc(hidden)]
 pub use loader::load_codex_events_from_directory;
 pub use loader::load_codex_events_with_detection;
+pub use quota::{
+    CodexDailyUsageWithQuotaEstimates, CodexWeeklyQuotaEstimate, CodexWeeklyQuotaEstimateStatus,
+    CodexWeeklyRateLimitObservation,
+};
 pub use report::{
     calculate_codex_model_cost, calculate_group_cost, codex_model_missing_pricing,
     non_cached_input_tokens,
@@ -70,8 +78,84 @@ mod tests {
     use super::*;
     use crate::cli::SharedArgs;
     use crate::{CodexModelUsage, CodexServiceTier, CodexTokenUsageEvent, CodexUsageBucket};
-    use ccusage_test_support::fs_fixture;
+    use ccusage_test_support::{EnvVarGuard, fs_fixture};
     use serde_json::json;
+
+    #[test]
+    fn loads_daily_groups_and_weekly_quota_estimates_in_one_source_pass() {
+        let fixture = fs_fixture!({
+            "sessions/2026/08/01/session.jsonl": [
+                quota_usage_line("2026-08-01T00:00:00Z", 1_000_000, 0.0, 1_786_051_200),
+                quota_usage_line("2026-08-02T00:00:00Z", 2_000_000, 25.0, 1_786_051_200),
+                quota_usage_line("2026-08-03T00:00:00Z", 3_000_000, 50.0, 1_786_051_200),
+                quota_usage_line("2026-08-04T00:00:00Z", 4_000_000, 0.0, 1_786_656_000),
+            ]
+            .join("\n"),
+        });
+        let _codex_home = EnvVarGuard::set("CODEX_HOME", fixture.root());
+        let mut pricing = PricingMap::default();
+        pricing.load_json(
+            r#"{
+                "gpt-test": {
+                    "input_cost_per_token": 0.000001,
+                    "output_cost_per_token": 0.000010
+                }
+            }"#,
+        );
+
+        let report = load_daily_groups_with_weekly_quota_estimates(
+            &SharedArgs {
+                single_thread: true,
+                timezone: Some("UTC".to_string()),
+                ..SharedArgs::default()
+            },
+            &pricing,
+            CodexSpeedPolicy::Forced(CodexServiceTier::Standard),
+            1_786_406_400_000,
+        )
+        .unwrap();
+
+        assert_eq!(report.groups.len(), 4);
+        assert_eq!(report.weekly_rate_limit_samples, 4);
+        assert_eq!(report.weekly_quota_estimates.len(), 1);
+        assert!((report.weekly_quota_estimates[0].estimated_weekly_cost_usd - 4.0).abs() < 1e-12);
+    }
+
+    fn quota_usage_line(
+        timestamp: &str,
+        total_input_tokens: u64,
+        used_percent: f64,
+        resets_at: i64,
+    ) -> String {
+        json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "model": "gpt-test",
+                    "last_token_usage": {
+                        "input_tokens": 1_000_000,
+                        "output_tokens": 0,
+                        "total_tokens": 1_000_000,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": total_input_tokens,
+                        "output_tokens": 0,
+                        "total_tokens": total_input_tokens,
+                    },
+                },
+                "rate_limits": {
+                    "primary": {
+                        "used_percent": used_percent,
+                        "window_minutes": 10_080,
+                        "resets_at": resets_at,
+                    },
+                },
+            },
+        })
+        .to_string()
+    }
 
     #[test]
     fn loads_directory_groups_with_date_filter_without_global_event_vector() {

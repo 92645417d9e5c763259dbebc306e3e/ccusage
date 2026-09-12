@@ -27,6 +27,23 @@ Relevant speed-setting event in Codex CLI 0.144.0 and later:
 - Token usage inherits the latest recognized setting in the rollout. A settings event without a `service_tier` key leaves the previous tier in place (auto-review threads emit these); a tier that is present but unrecognized clears it so a stale value is not inherited.
 - `thread_settings_applied` is not emitted per turn, so short rollouts carry no tier at all and stay unclassified for report policy to resolve.
 
+Weekly quota estimate input:
+
+- `payload.rate_limits.primary.window_minutes === 10080` identifies the weekly window.
+- `payload.rate_limits.primary.used_percent` is the observed used percentage.
+- `payload.rate_limits.primary.resets_at` supplies the reset horizon used to distinguish a reset from integer percentage noise.
+- Only a token-count record whose cumulative usage advances contributes a quota sample, preventing a rate-limit-only rebroadcast from repeating stale request usage.
+- The combined daily loader retains quota samples from only the most recent 90 days while its ordinary usage groups keep the requested report range.
+- A materially newer reset horizon plus a percentage drop closes one episode.
+- Same-horizon regressions are ignored.
+- A prior-horizon sample arriving during the first five minutes of an otherwise unchanged new episode is treated as a late reset handoff.
+- A materially older reset horizon freezes the current episode at its last valid observation.
+- Returning to a frozen episode's horizon does not resume it.
+- A later reset starts a new episode after a frozen episode.
+- An estimate requires more than 5 observed percentage points and prices only requests after the episode anchor through the final observation.
+- Open episodes are provisional and reset-closed episodes are completed.
+- Estimated weekly cost is an API-equivalent pricing heuristic and is not a subscription invoice or a statement of backend quota weighting.
+
 Relevant MultiAgent V2 subagent replay markers:
 
 - A subagent rollout replays its parent's history before the child's own turn, so the prefix must not be counted again.

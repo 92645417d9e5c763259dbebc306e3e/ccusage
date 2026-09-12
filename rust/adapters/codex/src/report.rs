@@ -181,6 +181,36 @@ pub fn calculate_codex_model_cost(
     )
 }
 
+pub(super) fn calculate_codex_usage_cost_at(
+    model: &str,
+    timestamp: crate::TimestampMs,
+    usage: CodexUsageBucket,
+    service_tier: Option<CodexServiceTier>,
+    pricing: &PricingMap,
+    speed: impl Into<CodexSpeedPolicy>,
+) -> f64 {
+    let Some(pricing) = pricing.find_at(model, timestamp) else {
+        return 0.0;
+    };
+    let recorded_standard_usage = if service_tier == Some(CodexServiceTier::Standard) {
+        usage
+    } else {
+        CodexUsageBucket::default()
+    };
+    let recorded_fast_usage = if service_tier == Some(CodexServiceTier::Fast) {
+        usage
+    } else {
+        CodexUsageBucket::default()
+    };
+    calculate_codex_usage_cost(
+        usage,
+        recorded_standard_usage,
+        recorded_fast_usage,
+        &pricing,
+        speed.into(),
+    )
+}
+
 fn calculate_codex_timestamped_cost(
     usage: &CodexTimestampedUsage,
     pricing: &crate::Pricing,
