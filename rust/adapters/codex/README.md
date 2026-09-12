@@ -51,6 +51,7 @@ chunking, and ordered parallel reads.
 - `quota::CodexWeeklyQuotaEstimate`
 - `types::merge_codex_service_tiers`
 - `run`
+- `run_quota`
 - `report_json`
 
 ## Depends on

@@ -3,10 +3,10 @@ use std::{ffi::OsString, path::PathBuf};
 use crate::arg_parser::ArgParser;
 use crate::help::{print_help_and_exit, print_version_and_exit};
 use ccusage_cli::{
-    AgentCommandArgs, AgentReportKind, BlocksArgs, CliConfig, CodexSpeed, Command, CostMode,
-    CostSource, DATE_BOUND_FORMATS, DailyArgs, OPENCODE_AGENT_REPORTS, STANDARD_AGENT_REPORTS,
-    SessionArgs, SharedArgs, SortOrder, StatuslineArgs, VisualBurnRate, WeekDay, WeeklyArgs,
-    normalize_date_bound,
+    AgentCommandArgs, AgentReportKind, BlocksArgs, CliConfig, CodexQuotaArgs, CodexSpeed, Command,
+    CostMode, CostSource, DATE_BOUND_FORMATS, DailyArgs, OPENCODE_AGENT_REPORTS,
+    STANDARD_AGENT_REPORTS, SessionArgs, SharedArgs, SortOrder, StatuslineArgs, VisualBurnRate,
+    WeekDay, WeeklyArgs, normalize_date_bound,
 };
 
 use crate::Cli;
@@ -123,6 +123,9 @@ impl Cli {
             return Err(format!("Unexpected argument '{extra}'"));
         }
         if let Some(message) = last_option_error(command.as_ref(), &shared) {
+            return Err(message);
+        }
+        if let Some(message) = codex_quota_date_filter_error(command.as_ref()) {
             return Err(message);
         }
         Ok(Self { command, shared })
@@ -600,6 +603,10 @@ fn parse_codex_command(
     mut shared: SharedArgs,
     config: &dyn CliConfig,
 ) -> Result<Command, String> {
+    if parser.peek() == Some("quota") {
+        parser.next();
+        return parse_codex_quota_command(parser, shared, config);
+    }
     let kind = parse_agent_report_kind(parser, "codex", STANDARD_AGENT_REPORTS)?;
     let mut codex_speed = CodexSpeed::Auto;
     config.apply_agent_args(&mut codex_speed, None, None);
@@ -619,6 +626,46 @@ fn parse_codex_command(
         by_agent: false,
         pi_path: None,
         open_claw_path: None,
+        codex_speed,
+    }))
+}
+
+fn parse_codex_quota_command(
+    parser: &mut ArgParser,
+    mut shared: SharedArgs,
+    config: &dyn CliConfig,
+) -> Result<Command, String> {
+    let mut codex_speed = CodexSpeed::Auto;
+    config.apply_agent_args(&mut codex_speed, None, None);
+    while parser.peek().is_some() {
+        if matches!(
+            parser.peek_name(),
+            Some(
+                "-j" | "--json"
+                    | "-O"
+                    | "--offline"
+                    | "--no-offline"
+                    | "--color"
+                    | "--no-color"
+                    | "-q"
+                    | "--jq"
+                    | "--config"
+                    | "--compact"
+                    | "--single-thread"
+            )
+        ) {
+            parse_shared_arg(parser, &mut shared)?;
+            continue;
+        }
+        match parser.next_flag()?.as_str() {
+            "--speed" => codex_speed = parse_codex_speed(&parser.value_for("--speed")?)?,
+            flag => return Err(format!("Unknown codex quota option '{flag}'")),
+        }
+    }
+    shared.breakdown = false;
+    shared.no_cost = false;
+    Ok(Command::CodexQuota(CodexQuotaArgs {
+        shared,
         codex_speed,
     }))
 }
@@ -958,7 +1005,7 @@ fn agent_report_supported(agent: &str, report: &str) -> bool {
             report,
             "daily" | "weekly" | "monthly" | "session" | "blocks" | "statusline"
         ),
-        "codex" => matches!(report, "daily" | "monthly" | "session"),
+        "codex" => matches!(report, "daily" | "monthly" | "session" | "quota"),
         "opencode" => matches!(report, "daily" | "weekly" | "monthly" | "session"),
         "amp" | "droid" | "codebuff" | "hermes" | "pi" | "goose" | "kilo" | "copilot"
         | "gemini" | "antigravity" | "kimi" | "qwen" | "openclaw" | "grok" | "zcode" => {
@@ -1053,6 +1100,7 @@ fn last_option_error(command: Option<&Command>, root_shared: &SharedArgs) -> Opt
         Some(Command::Session(args)) => (&args.shared, false),
         Some(Command::Blocks(args)) => (&args.shared, false),
         Some(Command::Statusline(_)) => (root_shared, false),
+        Some(Command::CodexQuota(args)) => (&args.shared, false),
         Some(
             Command::Codex(args)
             | Command::OpenCode(args)
@@ -1087,6 +1135,16 @@ fn last_option_error(command: Option<&Command>, root_shared: &SharedArgs) -> Opt
         return Some("The --last option cannot be used with --sections.".to_string());
     }
     None
+}
+
+fn codex_quota_date_filter_error(command: Option<&Command>) -> Option<String> {
+    let Some(Command::CodexQuota(args)) = command else {
+        return None;
+    };
+    (args.shared.since.is_some() || args.shared.until.is_some()).then(|| {
+        "Date filters are not available for codex quota; it always analyzes the most recent 90 days."
+            .to_string()
+    })
 }
 
 fn parse_cost_mode(value: &str) -> Result<CostMode, String> {

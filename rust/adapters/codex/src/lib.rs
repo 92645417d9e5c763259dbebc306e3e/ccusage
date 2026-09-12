@@ -11,7 +11,11 @@ mod report;
 mod speed;
 mod types;
 
-use crate::{PricingMap, Result, cli::AgentCommandArgs, log_level, print_json_or_jq, wants_json};
+use crate::{
+    PricingMap, Result,
+    cli::{AgentCommandArgs, CodexQuotaArgs},
+    log_level, print_json_or_jq, utc_now, wants_json,
+};
 
 pub use aggregate::{
     aggregate_events, filter_events_by_date, load_daily_groups_with_weekly_quota_estimates,
@@ -35,6 +39,7 @@ pub use types::{
 };
 pub(crate) use types::{CodexRawUsage, merge_codex_service_tiers};
 
+use quota::{print_quota_table, quota_report_json};
 use report::{print_table_from_groups, report_from_groups};
 
 use crate::cli::{AgentReportKind, CodexSpeed};
@@ -55,6 +60,32 @@ pub fn run(args: AgentCommandArgs) -> Result<()> {
         return print_json_or_jq(output, shared.jq.as_deref(), shared.no_cost);
     }
     print_table_from_groups(&groups, args.kind, &pricing, speed, &shared)
+}
+
+pub fn run_quota(args: CodexQuotaArgs) -> Result<()> {
+    let shared = args.shared;
+    let pricing = PricingMap::load_with_overrides(
+        shared.offline,
+        log_level() != Some(0),
+        shared.pricing_overrides.iter(),
+    );
+    let report = load_daily_groups_with_weekly_quota_estimates(
+        &shared,
+        &pricing,
+        resolve_codex_speed(args.codex_speed),
+        utc_now().as_millis(),
+    )?;
+    if wants_json(&shared) {
+        return print_json_or_jq(
+            quota_report_json(
+                report.weekly_rate_limit_samples,
+                &report.weekly_quota_estimates,
+            ),
+            shared.jq.as_deref(),
+            false,
+        );
+    }
+    print_quota_table(&report.weekly_quota_estimates, &shared)
 }
 
 #[doc(hidden)]

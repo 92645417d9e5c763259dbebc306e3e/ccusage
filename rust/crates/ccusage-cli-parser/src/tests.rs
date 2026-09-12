@@ -190,6 +190,11 @@ fn command_snapshot(command: Option<Command>) -> Value {
             "config": args.config.as_ref().map(|path| path.to_string_lossy().to_string()),
             "debug": args.debug,
         }),
+        Some(Command::CodexQuota(args)) => json!({
+            "type": "codexQuota",
+            "shared": shared_snapshot(&args.shared),
+            "codexSpeed": format!("{:?}", args.codex_speed),
+        }),
         Some(Command::Codex(args)) => agent_command_snapshot("codex", args),
         Some(Command::OpenCode(args)) => agent_command_snapshot("opencode", args),
         Some(Command::Amp(args)) => agent_command_snapshot("amp", args),
@@ -683,6 +688,21 @@ fn contextual_codex_help_lists_speed_choices() {
 }
 
 #[test]
+fn contextual_codex_quota_help_lists_the_query_command() {
+    let help = help_text_for_args(&[
+        "ccusage".to_string(),
+        "codex".to_string(),
+        "quota".to_string(),
+        "--help".to_string(),
+    ]);
+
+    assert!(help.contains("Estimate weekly quota cost from recent usage"));
+    assert!(help.contains("USAGE:\n  ccusage codex quota <OPTIONS>"));
+    assert!(help.contains("--json"));
+    assert!(!help.contains("--since"));
+}
+
+#[test]
 fn contextual_help_strips_path_like_program_name() {
     let help = help_text_for_args(&[
         "/usr/local/bin/ccusage".to_string(),
@@ -1056,6 +1076,33 @@ fn parses_codex_speed_option() {
         panic!("expected codex command");
     };
     assert_eq!(args.codex_speed, CodexSpeed::Fast);
+}
+
+#[test]
+fn accepts_codex_quota_command() {
+    let cli = parse(&[
+        "ccusage",
+        "codex",
+        "quota",
+        "--json",
+        "--offline",
+        "--speed",
+        "standard",
+    ]);
+    let Some(Command::CodexQuota(args)) = cli.command else {
+        panic!("expected codex quota command");
+    };
+    assert!(args.shared.json);
+    assert!(args.shared.offline);
+    assert_eq!(args.codex_speed, CodexSpeed::Standard);
+}
+
+#[test]
+fn rejects_date_filters_for_the_fixed_codex_quota_window() {
+    assert_eq!(
+        parse_error(&["ccusage", "--since", "2026-09-01", "codex", "quota"]),
+        "Date filters are not available for codex quota; it always analyzes the most recent 90 days."
+    );
 }
 
 #[test]

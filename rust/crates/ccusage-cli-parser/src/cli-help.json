@@ -229,6 +229,56 @@
 			"description": "Display this version"
 		}
 	],
+	"codex_quota_options": [
+		{
+			"flags": "-j, --json",
+			"description": "Output in JSON format",
+			"default": "false"
+		},
+		{
+			"flags": "-O, --offline",
+			"description": "Use cached pricing data instead of fetching from LiteLLM",
+			"default": "false"
+		},
+		{
+			"flags": "--no-offline",
+			"description": "Negatable of -O, --offline"
+		},
+		{
+			"flags": "--speed [speed]",
+			"description": "Cost speed tier: auto uses recorded settings, then Codex config.toml; use standard or fast to override",
+			"default": "auto",
+			"choices": ["auto", "standard", "fast"]
+		},
+		{
+			"flags": "--single-thread",
+			"description": "Disable parallel JSONL file loading",
+			"default": "false"
+		},
+		{
+			"flags": "--color",
+			"description": "Enable colored output. FORCE_COLOR=1 has the same effect.",
+			"default": "auto"
+		},
+		{
+			"flags": "--no-color",
+			"description": "Disable colored output. NO_COLOR=1 has the same effect.",
+			"default": "auto"
+		},
+		{
+			"flags": "--config <config>",
+			"description": "Path to configuration file",
+			"default": "auto-discovery"
+		},
+		{
+			"flags": "-h, --help",
+			"description": "Display this help message"
+		},
+		{
+			"flags": "-v, --version",
+			"description": "Display this version"
+		}
+	],
 	"daily_options": [
 		{
 			"flags": "-i, --instances",

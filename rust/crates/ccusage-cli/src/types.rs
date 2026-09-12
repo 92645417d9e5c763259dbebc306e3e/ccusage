@@ -12,6 +12,7 @@ pub enum Command {
     Blocks(BlocksArgs),
     Statusline(StatuslineArgs),
     Codex(AgentCommandArgs),
+    CodexQuota(CodexQuotaArgs),
     OpenCode(AgentCommandArgs),
     Amp(AgentCommandArgs),
     Droid(AgentCommandArgs),
@@ -176,6 +177,12 @@ pub struct AgentCommandArgs {
     pub by_agent: bool,
     pub pi_path: Option<String>,
     pub open_claw_path: Option<String>,
+    pub codex_speed: CodexSpeed,
+}
+
+#[derive(Clone)]
+pub struct CodexQuotaArgs {
+    pub shared: SharedArgs,
     pub codex_speed: CodexSpeed,
 }
 

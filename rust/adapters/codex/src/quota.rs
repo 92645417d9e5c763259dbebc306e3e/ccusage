@@ -1,7 +1,11 @@
 use serde::Serialize;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use crate::{CodexGroup, parse_ts_timestamp};
+use crate::{
+    Align, CodexGroup, Result, SimpleTable, cli::SharedArgs, format_currency, parse_ts_timestamp,
+    print_box_title, terminal_style, terminal_width,
+};
 
 const RECENT_WINDOW_MILLIS: i64 = 90 * 24 * 60 * 60 * 1_000;
 const RESET_HORIZON_TOLERANCE_SECONDS: i64 = 5 * 60;
@@ -44,6 +48,71 @@ pub struct CodexDailyUsageWithQuotaEstimates {
     pub groups: BTreeMap<String, CodexGroup>,
     pub weekly_rate_limit_samples: usize,
     pub weekly_quota_estimates: Vec<CodexWeeklyQuotaEstimate>,
+}
+
+pub(super) fn quota_report_json(
+    weekly_rate_limit_samples: usize,
+    estimates: &[CodexWeeklyQuotaEstimate],
+) -> Value {
+    json!({
+        "weeklyRateLimitSamples": weekly_rate_limit_samples,
+        "weeklyQuotaEstimates": estimates,
+    })
+}
+
+pub(super) fn print_quota_table(
+    estimates: &[CodexWeeklyQuotaEstimate],
+    shared: &SharedArgs,
+) -> Result<()> {
+    if estimates.is_empty() {
+        eprintln!("No Codex weekly quota cost estimates available.");
+        return Ok(());
+    }
+    print_box_title("Codex Weekly Quota Cost Estimates", shared);
+    let mut table = SimpleTable::new(
+        vec![
+            "Started",
+            "Ended",
+            "Usage",
+            "Observed Cost",
+            "Estimated Limit",
+            "Status",
+        ],
+        vec![
+            Align::Left,
+            Align::Left,
+            Align::Right,
+            Align::Right,
+            Align::Right,
+            Align::Left,
+        ],
+        terminal_style(shared),
+    )
+    .with_terminal_width(terminal_width())
+    .with_date_compaction(true);
+    for estimate in estimates {
+        table.push(quota_table_row(estimate));
+    }
+    table.print()?;
+    Ok(())
+}
+
+fn quota_table_row(estimate: &CodexWeeklyQuotaEstimate) -> Vec<String> {
+    vec![
+        estimate.started_at.clone(),
+        estimate.ended_at.clone(),
+        format!(
+            "{:.1}% - {:.1}%",
+            estimate.used_percent_start, estimate.used_percent_end
+        ),
+        format_currency(estimate.observed_cost_usd),
+        format_currency(estimate.estimated_weekly_cost_usd),
+        match estimate.status {
+            CodexWeeklyQuotaEstimateStatus::Completed => "completed",
+            CodexWeeklyQuotaEstimateStatus::Provisional => "provisional",
+        }
+        .to_string(),
+    ]
 }
 
 pub(super) fn estimate_weekly_quota_costs_from_timeline(
@@ -229,6 +298,63 @@ mod tests {
         assert!((estimate.estimated_weekly_cost_usd - 4.0).abs() < f64::EPSILON);
         assert_eq!(estimate.sample_count, 3);
         assert_eq!(estimate.status, CodexWeeklyQuotaEstimateStatus::Completed);
+    }
+
+    #[test]
+    fn quota_json_exposes_samples_and_estimates_without_daily_groups() {
+        let estimates = [CodexWeeklyQuotaEstimate {
+            started_at: "2026-08-01T00:00:00Z".to_string(),
+            ended_at: "2026-08-03T00:00:00Z".to_string(),
+            used_percent_start: 25.0,
+            used_percent_end: 75.0,
+            observed_cost_usd: 2.0,
+            estimated_weekly_cost_usd: 4.0,
+            sample_count: 3,
+            status: CodexWeeklyQuotaEstimateStatus::Completed,
+        }];
+
+        assert_eq!(
+            quota_report_json(4, &estimates),
+            serde_json::json!({
+                "weeklyRateLimitSamples": 4,
+                "weeklyQuotaEstimates": [{
+                    "startedAt": "2026-08-01T00:00:00Z",
+                    "endedAt": "2026-08-03T00:00:00Z",
+                    "usedPercentStart": 25.0,
+                    "usedPercentEnd": 75.0,
+                    "observedCostUsd": 2.0,
+                    "estimatedWeeklyCostUsd": 4.0,
+                    "sampleCount": 3,
+                    "status": "completed",
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn quota_table_row_formats_the_estimated_limit_in_us_dollars() {
+        let estimate = CodexWeeklyQuotaEstimate {
+            started_at: "2026-08-01T00:00:00Z".to_string(),
+            ended_at: "2026-08-03T00:00:00Z".to_string(),
+            used_percent_start: 25.0,
+            used_percent_end: 75.0,
+            observed_cost_usd: 2.0,
+            estimated_weekly_cost_usd: 4.0,
+            sample_count: 3,
+            status: CodexWeeklyQuotaEstimateStatus::Completed,
+        };
+
+        assert_eq!(
+            quota_table_row(&estimate),
+            vec![
+                "2026-08-01T00:00:00Z".to_string(),
+                "2026-08-03T00:00:00Z".to_string(),
+                "25.0% - 75.0%".to_string(),
+                "$2.00".to_string(),
+                "$4.00".to_string(),
+                "completed".to_string(),
+            ]
+        );
     }
 
     #[test]

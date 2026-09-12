@@ -542,6 +542,21 @@ When using `--breakdown`, the JSON includes per-model details:
 }
 ```
 
+### Codex Weekly Quota Estimates
+
+Use `ccusage codex quota --json` to query the weekly quota estimates derived from rate-limit observations in recent Codex logs.
+
+- `weeklyRateLimitSamples` is the number of deduplicated weekly-window observations found in the most recent 90 days.
+- `weeklyQuotaEstimates` is ordered chronologically and contains completed and provisional quota episodes.
+- `startedAt` and `endedAt` bound the valid observations used by an estimate.
+- `usedPercentStart` and `usedPercentEnd` define the observed usage span.
+- `observedCostUsd` prices requests after the anchor through the final valid observation.
+- `estimatedWeeklyCostUsd` scales that observed cost to 100 percent of the weekly limit.
+- `sampleCount` records the valid observations retained for the episode.
+- `status` is `completed` after a detected reset and `provisional` for an eligible open episode.
+
+These amounts are API-equivalent pricing estimates. They do not represent a subscription invoice or reveal the backend's quota weighting.
+
 ## Integration Examples
 
 ### Using with jq

@@ -235,6 +235,10 @@
 				{
 					"name": "session",
 					"description": "Show Codex token usage grouped by session"
+				},
+				{
+					"name": "quota",
+					"description": "Estimate weekly quota cost from recent usage"
 				}
 			]
 		},
@@ -255,6 +259,12 @@
 			"description": "Show Codex token usage grouped by session",
 			"usage": "ccusage codex session <OPTIONS>",
 			"options": "codex_options"
+		},
+		{
+			"path": ["codex", "quota"],
+			"description": "Estimate weekly quota cost from recent usage",
+			"usage": "ccusage codex quota <OPTIONS>",
+			"options": "codex_quota_options"
 		},
 		{
 			"path": ["opencode"],

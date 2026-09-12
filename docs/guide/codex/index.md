@@ -17,6 +17,9 @@ ccusage codex monthly
 
 # Codex sessions
 ccusage codex session
+
+# Weekly quota cost estimates
+ccusage codex quota
 ```
 
 Most users can start with unified reports such as `ccusage daily`. Add the `codex` namespace only when you want to focus the same report shape on Codex usage or pass Codex-specific options such as `--speed`.
@@ -36,8 +39,9 @@ CODEX_HOME="$HOME/.codex,$HOME/.codex-work,$HOME/codex-exec-logs" ccusage codex 
 | `ccusage codex daily`   | Aggregate usage by date      | [Daily Usage](/guide/daily-reports)     |
 | `ccusage codex monthly` | Aggregate usage by month     | [Monthly Usage](/guide/monthly-reports) |
 | `ccusage codex session` | Group usage by Codex session | [Session Usage](/guide/session-reports) |
+| `ccusage codex quota`   | Estimate weekly quota cost   | [JSON Output](/guide/json-output)       |
 
-These views support `--json`, `--compact`, `--offline`, and `--speed auto|standard|fast`.
+The usage views support `--json`, `--compact`, `--offline`, and `--speed auto|standard|fast`. The quota view supports `--json`, `--offline`, and the same speed overrides.
 
 ## Monthly Example
 
@@ -52,6 +56,7 @@ These views support `--json`, `--compact`, `--offline`, and `--speed auto|standa
 - **Speed pricing** – `--speed auto` is the default. For rollouts written by Codex CLI 0.144.0 and later, ccusage applies recorded `thread_settings_applied` tier changes chronologically: `priority` and legacy `fast` use Fast pricing, while `default` uses Standard pricing. Unmarked usage falls back to `config.toml` detection. Pass `--speed fast` or `--speed standard` to override every recorded tier. Fast pricing uses a model-specific multiplier only when one is available; otherwise, ccusage keeps standard pricing rather than inventing a rate.
 - **Legacy fallback** – Early September 2025 logs that never recorded `turn_context` metadata are still included; the CLI assumes `gpt-5` for pricing so you can review the tokens even though the model tag is missing (the JSON output also marks these rows with `"isFallback": true`).
 - **Cost formula** – Non-cached input uses the standard input price; cached input uses the cache-read price (falling back to the input price when missing); and output tokens are billed at the output price. All prices are per million tokens. Reasoning tokens may be shown for reference, but they are part of the output charge and are not billed separately.
+- **Weekly quota estimate** - `ccusage codex quota` finds weekly rate-limit episodes in the most recent 90 days. An episode needs more than 5 observed percentage points. The command prices requests after the first observation through the last valid observation, then estimates a full limit as `observed cost * 100 / used percentage span`. Completed rows ended at a detected reset; provisional rows are still open. The result is an API-equivalent pricing heuristic, not a subscription invoice or a statement of backend quota weighting.
 - **Totals and reports** – Daily, monthly, and session views display per-model breakdowns, overall totals, and optional JSON for automation.
 
 ## Environment Variables
@@ -90,9 +95,12 @@ Codex focused views use the same JSON mode as the shared reports:
 ccusage codex daily --json
 ccusage codex monthly --json
 ccusage codex session --json
+ccusage codex quota --json
 ```
 
 Session JSON includes per-model breakdowns, cached token counts, `lastActivity`, and `isFallback` flags for any events that required the legacy `gpt-5` pricing fallback.
+
+Quota JSON contains `weeklyRateLimitSamples` and a chronological `weeklyQuotaEstimates` array. Each estimate includes its observation timestamps, starting and ending usage percentages, observed API-equivalent cost, estimated full-limit cost, sample count, and `completed` or `provisional` status.
 
 Have feedback or ideas? [Open an issue](https://github.com/ccusage/ccusage/issues/new) so we can improve Codex support.
 
