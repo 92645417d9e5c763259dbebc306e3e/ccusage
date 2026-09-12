@@ -542,6 +542,37 @@ When using `--breakdown`, the JSON includes per-model details:
 }
 ```
 
+### Codex Reasoning-Effort Breakdown
+
+Focused Codex reports specialize `--breakdown` by adding model-and-reasoning-effort details:
+
+```bash
+ccusage codex daily --json --breakdown
+```
+
+Each report row and `totals` receives a `reasoningEffortBreakdowns` array:
+
+```json
+{
+	"reasoningEffortBreakdowns": [
+		{
+			"model": "gpt-5.6-sol",
+			"reasoningEffort": "high",
+			"inputTokens": 1200,
+			"cacheCreationTokens": 300,
+			"cacheReadTokens": 8500,
+			"outputTokens": 400,
+			"reasoningOutputTokens": 250,
+			"totalTokens": 10400,
+			"costUSD": 0.42,
+			"isFallback": false
+		}
+	]
+}
+```
+
+The base model remains the pricing identity, so splitting by reasoning effort does not change the row or total cost. The field is omitted without `--breakdown`. Missing effort and conflicting duplicate metadata use `unknown`; unrecognized non-empty effort values use `custom`.
+
 ### Codex Weekly Quota Estimates
 
 Use `ccusage codex quota --json` to query the weekly quota estimates derived from rate-limit observations in recent Codex logs.

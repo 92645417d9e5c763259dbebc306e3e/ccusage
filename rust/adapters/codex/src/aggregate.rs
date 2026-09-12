@@ -11,8 +11,8 @@ use jiff::tz::TimeZone as JiffTimeZone;
 use rustc_hash::FxHasher;
 
 use crate::{
-    CodexDailyUsageWithQuotaEstimates, CodexGroup, CodexServiceTier, CodexTokenUsageEvent,
-    CodexUsageBucket, CodexWeeklyRateLimitObservation, PricingMap, Result,
+    CodexDailyUsageWithQuotaEstimates, CodexGroup, CodexModelUsage, CodexServiceTier,
+    CodexTokenUsageEvent, CodexUsageBucket, CodexWeeklyRateLimitObservation, PricingMap, Result,
     cli::{AgentReportKind, SharedArgs, WeekDay},
     fast::FxHashMap,
     format_date_tz, merge_codex_service_tiers, parse_ts_timestamp, parse_tz, wants_json,
@@ -25,6 +25,7 @@ use super::{
     replay::CodexReplayPlan,
     report::calculate_codex_usage_cost_at,
     speed::CodexSpeedPolicy,
+    types::CodexReasoningEffort,
 };
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -44,6 +45,8 @@ struct CodexEventKey {
 
 struct CodexDedupeRecord {
     service_tier: Option<CodexServiceTier>,
+    reasoning_effort: CodexReasoningEffort,
+    is_fallback_model: bool,
     model: CompactString,
     session_id: Option<CompactString>,
 }
@@ -54,6 +57,20 @@ type CodexDedupeShards = [Mutex<CodexDedupeMap>];
 struct CodexAggregation {
     groups: BTreeMap<String, CodexGroup>,
     seen: CodexDedupeMap,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct CodexModelReasoningEffort {
+    pub(super) model: CompactString,
+    pub(super) reasoning_effort: CodexReasoningEffort,
+}
+
+pub(super) type CodexReasoningEffortGroups =
+    BTreeMap<String, BTreeMap<CodexModelReasoningEffort, CodexModelUsage>>;
+
+pub(super) struct CodexReportData {
+    pub(super) groups: BTreeMap<String, CodexGroup>,
+    pub(super) reasoning_effort_groups: Option<CodexReasoningEffortGroups>,
 }
 
 #[derive(Default)]
@@ -70,6 +87,7 @@ struct CodexAggregateRun<'a> {
     kind: AgentReportKind,
     replay_plan: &'a CodexReplayPlan,
     weekly_limit_since_millis: Option<i64>,
+    capture_reasoning_effort: bool,
 }
 
 pub fn load_groups(
@@ -83,14 +101,40 @@ pub fn load_groups(
     load_groups_from_sources(&sources, shared, kind)
 }
 
+pub(super) fn load_report_data(
+    shared: &SharedArgs,
+    kind: AgentReportKind,
+) -> Result<CodexReportData> {
+    let sources = paths::codex_usage_sources()?;
+    if sources.len() == 1 && !wants_json(shared) {
+        return load_report_data_from_directory(&sources[0].dir, shared, kind, shared.breakdown);
+    }
+    load_report_data_from_sources(&sources, shared, kind, shared.breakdown)
+}
+
 fn load_groups_from_sources(
     sources: &[paths::CodexUsageSource],
     shared: &SharedArgs,
     kind: AgentReportKind,
 ) -> Result<BTreeMap<String, CodexGroup>> {
-    let (mut data, seen) = load_grouped_data_from_sources(sources, shared, kind, None)?;
+    Ok(load_report_data_from_sources(sources, shared, kind, false)?.groups)
+}
+
+fn load_report_data_from_sources(
+    sources: &[paths::CodexUsageSource],
+    shared: &SharedArgs,
+    kind: AgentReportKind,
+    capture_reasoning_effort: bool,
+) -> Result<CodexReportData> {
+    let (mut data, seen) =
+        load_grouped_data_from_sources(sources, shared, kind, None, capture_reasoning_effort)?;
     apply_recorded_usage_from_shards(&mut data.groups, &seen, shared, kind);
-    Ok(data.groups)
+    let reasoning_effort_groups =
+        capture_reasoning_effort.then(|| reasoning_effort_groups_from_shards(&seen, shared, kind));
+    Ok(CodexReportData {
+        groups: data.groups,
+        reasoning_effort_groups,
+    })
 }
 
 pub fn load_daily_groups_with_weekly_quota_estimates(
@@ -105,6 +149,7 @@ pub fn load_daily_groups_with_weekly_quota_estimates(
         shared,
         AgentReportKind::Daily,
         Some(recent_window_start_millis(now_millis)),
+        false,
     )?;
     apply_recorded_usage_from_shards(&mut data.groups, &seen, shared, AgentReportKind::Daily);
     dedupe_weekly_rate_limits(&mut data.weekly_rate_limits);
@@ -124,6 +169,7 @@ fn load_grouped_data_from_sources(
     shared: &SharedArgs,
     kind: AgentReportKind,
     weekly_limit_since_millis: Option<i64>,
+    capture_reasoning_effort: bool,
 ) -> Result<(CodexGroupedData, Vec<Mutex<CodexDedupeMap>>)> {
     let file_groups = paths::collect_deduped_codex_usage_files(sources);
     let files_by_group = file_groups
@@ -165,6 +211,7 @@ fn load_grouped_data_from_sources(
                     kind,
                     replay_plan: &replay_plan,
                     weekly_limit_since_millis,
+                    capture_reasoning_effort,
                 },
                 &seen,
             )?,
@@ -178,6 +225,15 @@ pub(super) fn load_groups_from_directory(
     shared: &SharedArgs,
     kind: AgentReportKind,
 ) -> Result<BTreeMap<String, CodexGroup>> {
+    Ok(load_report_data_from_directory(sessions_dir, shared, kind, false)?.groups)
+}
+
+pub(super) fn load_report_data_from_directory(
+    sessions_dir: &Path,
+    shared: &SharedArgs,
+    kind: AgentReportKind,
+    capture_reasoning_effort: bool,
+) -> Result<CodexReportData> {
     let all_files = paths::collect_codex_usage_files(sessions_dir);
     let files = paths::filter_codex_usage_files(sessions_dir, &all_files, shared);
     let replay_plan = if shared.since.is_some() || shared.until.is_some() {
@@ -196,14 +252,27 @@ pub(super) fn load_groups_from_directory(
         kind,
         replay_plan: &replay_plan,
         weekly_limit_since_millis: None,
+        capture_reasoning_effort,
     };
     if shared.single_thread {
-        return aggregate_files_local(&run);
+        let CodexAggregation { mut groups, seen } = aggregate_files_local_with_seen(&run)?;
+        apply_recorded_usage_entries(&mut groups, seen.iter(), shared, kind);
+        let reasoning_effort_groups = capture_reasoning_effort
+            .then(|| reasoning_effort_groups_from_entries(seen.iter(), shared, kind));
+        return Ok(CodexReportData {
+            groups,
+            reasoning_effort_groups,
+        });
     }
     let seen = create_dedupe_shards();
     let mut data = aggregate_files_parallel(&run, &seen)?;
     apply_recorded_usage_from_shards(&mut data.groups, &seen, shared, kind);
-    Ok(data.groups)
+    let reasoning_effort_groups =
+        capture_reasoning_effort.then(|| reasoning_effort_groups_from_shards(&seen, shared, kind));
+    Ok(CodexReportData {
+        groups: data.groups,
+        reasoning_effort_groups,
+    })
 }
 
 fn aggregate_files_with_dedupe(
@@ -282,7 +351,18 @@ fn aggregate_file(
         run.sessions_dir,
         file,
         run.replay_plan.replay_prefix(file),
-        |event| add_event_to_groups(&event, run.kind, timezone, run.shared, seen, groups),
+        run.capture_reasoning_effort,
+        |event, reasoning_effort| {
+            add_event_to_groups(
+                &event,
+                reasoning_effort,
+                run.kind,
+                timezone,
+                run.shared,
+                seen,
+                groups,
+            )
+        },
         |observation| {
             if run.weekly_limit_since_millis.is_none_or(|since| {
                 parse_ts_timestamp(&observation.timestamp)
@@ -293,12 +373,6 @@ fn aggregate_file(
             Ok(())
         },
     )
-}
-
-fn aggregate_files_local(run: &CodexAggregateRun<'_>) -> Result<BTreeMap<String, CodexGroup>> {
-    let CodexAggregation { mut groups, seen } = aggregate_files_local_with_seen(run)?;
-    apply_recorded_usage_entries(&mut groups, seen.iter(), run.shared, run.kind);
-    Ok(groups)
 }
 
 fn aggregate_files_local_with_seen(run: &CodexAggregateRun<'_>) -> Result<CodexAggregation> {
@@ -320,16 +394,28 @@ fn aggregate_file_local(
     timezone: Option<&JiffTimeZone>,
     aggregation: &mut CodexAggregation,
 ) -> Result<()> {
-    parser::visit_codex_session_file(
+    parser::visit_codex_session_file_with_weekly_limits(
         run.sessions_dir,
         file,
         run.replay_plan.replay_prefix(file),
-        |event| add_event_to_groups_local(&event, run.kind, timezone, run.shared, aggregation),
+        run.capture_reasoning_effort,
+        |event, reasoning_effort| {
+            add_event_to_groups_local(
+                &event,
+                reasoning_effort,
+                run.kind,
+                timezone,
+                run.shared,
+                aggregation,
+            )
+        },
+        |_| Ok(()),
     )
 }
 
 fn add_event_to_groups(
     event: &CodexTokenUsageEvent,
+    reasoning_effort: CodexReasoningEffort,
     kind: AgentReportKind,
     timezone: Option<&JiffTimeZone>,
     shared: &SharedArgs,
@@ -342,7 +428,14 @@ fn add_event_to_groups(
     let model = crate::model_aliases::resolve_model_name(model);
     let timestamp = parse_ts_timestamp(&event.timestamp)
         .ok_or_else(|| crate::cli_error(format!("Invalid Codex timestamp: {}", event.timestamp)))?;
-    if !insert_event_key(event, timestamp, model.as_ref(), kind, seen) {
+    if !insert_event_key(
+        event,
+        reasoning_effort,
+        timestamp,
+        model.as_ref(),
+        kind,
+        seen,
+    ) {
         return Ok(());
     }
     add_deduped_event_to_groups(
@@ -358,6 +451,7 @@ fn add_event_to_groups(
 
 fn add_event_to_groups_local(
     event: &CodexTokenUsageEvent,
+    reasoning_effort: CodexReasoningEffort,
     kind: AgentReportKind,
     timezone: Option<&JiffTimeZone>,
     shared: &SharedArgs,
@@ -370,7 +464,14 @@ fn add_event_to_groups_local(
     let timestamp = parse_ts_timestamp(&event.timestamp)
         .ok_or_else(|| crate::cli_error(format!("Invalid Codex timestamp: {}", event.timestamp)))?;
     let key = codex_event_key(event, timestamp, model.as_ref(), kind);
-    if !insert_dedupe_record(&mut aggregation.seen, key, event, model.as_ref(), kind) {
+    if !insert_dedupe_record(
+        &mut aggregation.seen,
+        key,
+        event,
+        reasoning_effort,
+        model.as_ref(),
+        kind,
+    ) {
         return Ok(());
     }
     add_deduped_event_to_groups(
@@ -626,6 +727,96 @@ fn apply_recorded_usage_entries<'a>(
     }
 }
 
+fn reasoning_effort_groups_from_shards(
+    seen: &CodexDedupeShards,
+    shared: &SharedArgs,
+    kind: AgentReportKind,
+) -> CodexReasoningEffortGroups {
+    let mut groups = BTreeMap::new();
+    for shard in seen {
+        let records = shard.lock().unwrap();
+        add_reasoning_effort_records(&mut groups, records.iter(), shared, kind);
+    }
+    groups
+}
+
+fn reasoning_effort_groups_from_entries<'a>(
+    records: impl IntoIterator<Item = (&'a CodexEventKey, &'a CodexDedupeRecord)>,
+    shared: &SharedArgs,
+    kind: AgentReportKind,
+) -> CodexReasoningEffortGroups {
+    let mut groups = BTreeMap::new();
+    add_reasoning_effort_records(&mut groups, records, shared, kind);
+    groups
+}
+
+fn add_reasoning_effort_records<'a>(
+    groups: &mut CodexReasoningEffortGroups,
+    records: impl IntoIterator<Item = (&'a CodexEventKey, &'a CodexDedupeRecord)>,
+    shared: &SharedArgs,
+    kind: AgentReportKind,
+) {
+    let timezone = parse_tz(shared.timezone.as_deref()).or_else(|| Some(JiffTimeZone::system()));
+    for (key, record) in records {
+        let Some(reasoning_effort) = record.reasoning_effort.reporting_bucket() else {
+            continue;
+        };
+        let Some(period) = codex_period_for(
+            key.timestamp,
+            record.session_id.as_deref(),
+            kind,
+            timezone.as_ref(),
+            shared,
+        ) else {
+            continue;
+        };
+        let breakdown = groups
+            .entry(period)
+            .or_default()
+            .entry(CodexModelReasoningEffort {
+                model: record.model.clone(),
+                reasoning_effort,
+            })
+            .or_default();
+        accumulate_codex_record_into_model_usage(breakdown, key, record);
+    }
+}
+
+fn accumulate_codex_record_into_model_usage(
+    model_usage: &mut CodexModelUsage,
+    key: &CodexEventKey,
+    record: &CodexDedupeRecord,
+) {
+    model_usage.input_tokens += key.input_tokens;
+    model_usage.cached_input_tokens += key.cached_input_tokens;
+    model_usage.cache_creation_tokens += key.cache_creation_tokens;
+    model_usage.output_tokens += key.output_tokens;
+    model_usage.reasoning_output_tokens += key.reasoning_output_tokens;
+    model_usage.total_tokens += key.total_tokens;
+    let usage = codex_usage_bucket(key, record.model.as_str());
+    model_usage.long_context_input_tokens += usage.long_context_input_tokens;
+    model_usage.long_context_cached_input_tokens += usage.long_context_cached_input_tokens;
+    model_usage.long_context_cache_creation_tokens += usage.long_context_cache_creation_tokens;
+    model_usage.long_context_output_tokens += usage.long_context_output_tokens;
+    if crate::has_time_dependent_pricing(record.model.as_str()) {
+        let timestamped_usage = model_usage
+            .timestamped_usage
+            .entry(key.timestamp.as_millis())
+            .or_default();
+        merge_codex_usage_bucket(&mut timestamped_usage.usage, usage);
+    }
+    if let Some(service_tier) = record.service_tier {
+        merge_recorded_codex_usage(
+            model_usage,
+            record.model.as_str(),
+            key.timestamp,
+            service_tier,
+            usage,
+        );
+    }
+    model_usage.is_fallback |= record.is_fallback_model;
+}
+
 fn quota_costs_from_shards(
     seen: &CodexDedupeShards,
     pricing: &PricingMap,
@@ -707,6 +898,7 @@ fn create_dedupe_shards() -> Vec<Mutex<CodexDedupeMap>> {
 
 fn insert_event_key(
     event: &CodexTokenUsageEvent,
+    reasoning_effort: CodexReasoningEffort,
     timestamp: crate::TimestampMs,
     model: &str,
     kind: AgentReportKind,
@@ -720,6 +912,7 @@ fn insert_event_key(
         &mut seen[shard_index].lock().unwrap(),
         key,
         event,
+        reasoning_effort,
         model,
         kind,
     )
@@ -729,17 +922,22 @@ fn insert_dedupe_record(
     seen: &mut CodexDedupeMap,
     key: CodexEventKey,
     event: &CodexTokenUsageEvent,
+    reasoning_effort: CodexReasoningEffort,
     model: &str,
     kind: AgentReportKind,
 ) -> bool {
     if let Some(record) = seen.get_mut(&key) {
         record.service_tier = merge_codex_service_tiers(record.service_tier, event.service_tier);
+        record.reasoning_effort = record.reasoning_effort.merge(reasoning_effort);
+        record.is_fallback_model |= event.is_fallback_model;
         return false;
     }
     seen.insert(
         key,
         CodexDedupeRecord {
             service_tier: event.service_tier,
+            reasoning_effort,
+            is_fallback_model: event.is_fallback_model,
             model: CompactString::new(model),
             session_id: (kind == AgentReportKind::Session)
                 .then(|| CompactString::new(&event.session_id)),
@@ -811,7 +1009,10 @@ fn merge_grouped_data(target: &mut CodexGroupedData, mut source: CodexGroupedDat
         .append(&mut source.weekly_rate_limits);
 }
 
-fn merge_codex_model_usage(target: &mut crate::CodexModelUsage, source: crate::CodexModelUsage) {
+pub(super) fn merge_codex_model_usage(
+    target: &mut crate::CodexModelUsage,
+    source: crate::CodexModelUsage,
+) {
     target.input_tokens += source.input_tokens;
     target.cached_input_tokens += source.cached_input_tokens;
     target.cache_creation_tokens += source.cache_creation_tokens;

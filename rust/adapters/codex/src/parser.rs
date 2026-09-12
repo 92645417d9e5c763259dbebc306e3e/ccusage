@@ -16,8 +16,8 @@ use crate::{
 };
 
 use super::types::{
-    CodexInfo, CodexLogEntry, CodexModelMetadata, CodexPayload, CodexResultFields,
-    CodexSessionLogEntry, CodexTimestamp,
+    CodexInfo, CodexLogEntry, CodexModelMetadata, CodexPayload, CodexReasoningEffort,
+    CodexResultFields, CodexSessionLogEntry, CodexTimestamp,
 };
 
 static EVENT_MSG_TYPE_FINDER: LazyLock<Finder<'static>> =
@@ -33,6 +33,9 @@ static THREAD_SETTINGS_APPLIED_FINDER: LazyLock<Finder<'static>> =
 static COMPACT_TYPE_FIELD_FINDER: LazyLock<Finder<'static>> =
     LazyLock::new(|| Finder::new(br#""type":"#));
 static TYPE_KEY_FINDER: LazyLock<Finder<'static>> = LazyLock::new(|| Finder::new(br#""type""#));
+static EFFORT_FIELD_FINDER: LazyLock<Finder<'static>> =
+    LazyLock::new(|| Finder::new(br#""effort":""#));
+static EFFORT_KEY_FINDER: LazyLock<Finder<'static>> = LazyLock::new(|| Finder::new(br#""effort""#));
 static USAGE_FIELD_FINDER: LazyLock<Finder<'static>> =
     LazyLock::new(|| Finder::new(br#""usage":"#));
 static INPUT_TOKENS_FIELD_FINDER: LazyLock<Finder<'static>> =
@@ -57,6 +60,7 @@ struct CodexAutoReviewFallback<'a> {
 
 #[derive(Clone, Copy)]
 enum CodexLineKind {
+    TurnContext,
     Session,
     Headless,
 }
@@ -64,6 +68,14 @@ enum CodexLineKind {
 struct CodexExecTimestamps {
     event: String,
     model: String,
+}
+
+#[derive(Default)]
+struct CodexSessionContext {
+    model: Option<String>,
+    model_is_fallback: bool,
+    service_tier: Option<CodexServiceTier>,
+    reasoning_effort: CodexReasoningEffort,
 }
 
 /// Tracks how far a forked session's leading events still match the history it
@@ -164,7 +176,8 @@ pub(super) fn visit_codex_session_file(
         sessions_dir,
         path,
         replayed_prefix,
-        &mut visit,
+        false,
+        |event, _| visit(event),
         |_| Ok(()),
     )
 }
@@ -173,7 +186,8 @@ pub(super) fn visit_codex_session_file_with_weekly_limits(
     sessions_dir: &Path,
     path: &Path,
     replayed_prefix: Option<&[CodexRawUsage]>,
-    mut visit: impl FnMut(CodexTokenUsageEvent) -> Result<()>,
+    capture_reasoning_effort: bool,
+    mut visit: impl FnMut(CodexTokenUsageEvent, CodexReasoningEffort) -> Result<()>,
     mut visit_weekly_limit: impl FnMut(CodexWeeklyRateLimitObservation) -> Result<()>,
 ) -> Result<()> {
     let Ok(file) = fs::File::open(path) else {
@@ -183,16 +197,23 @@ pub(super) fn visit_codex_session_file_with_weekly_limits(
     let mut line = Vec::new();
     let session_id = codex_session_id(sessions_dir, path);
     let mut previous_totals: Option<CodexRawUsage> = None;
-    let mut current_model: Option<String> = None;
-    let mut current_model_is_fallback = false;
-    let mut current_service_tier = None;
+    let mut context = CodexSessionContext {
+        reasoning_effort: if capture_reasoning_effort {
+            CodexReasoningEffort::Missing
+        } else {
+            CodexReasoningEffort::Disabled
+        },
+        ..CodexSessionContext::default()
+    };
     let fallback_timestamp = file_modified_timestamp(path);
     let mut replay = match replayed_prefix {
         Some(prefix) => CodexReplayState::MatchingParent { prefix, index: 0 },
         None => CodexReplayState::Done,
     };
     let mut visit_filtered =
-        |event: CodexTokenUsageEvent, weekly_limit: Option<CodexWeeklyRateLimitObservation>| {
+        |event: CodexTokenUsageEvent,
+         reasoning_effort: CodexReasoningEffort,
+         weekly_limit: Option<CodexWeeklyRateLimitObservation>| {
             // Each arm either returns or advances the state toward `Done`, so this
             // loop only re-runs to apply the event to the state it switched to.
             loop {
@@ -235,7 +256,7 @@ pub(super) fn visit_codex_session_file_with_weekly_limits(
                         replay = CodexReplayState::Done;
                     }
                     CodexReplayState::Done => {
-                        visit(event)?;
+                        visit(event, reasoning_effort)?;
                         if let Some(weekly_limit) = weekly_limit {
                             visit_weekly_limit(weekly_limit)?;
                         }
@@ -256,8 +277,11 @@ pub(super) fn visit_codex_session_file_with_weekly_limits(
         let Some(line_kind) = codex_line_usage_kind(&line) else {
             continue;
         };
+        let turn_context_effort = (capture_reasoning_effort
+            && matches!(line_kind, CodexLineKind::TurnContext))
+        .then(|| codex_reasoning_effort(&line));
         match line_kind {
-            CodexLineKind::Session => {
+            CodexLineKind::TurnContext | CodexLineKind::Session => {
                 let Ok(value) = serde_json::from_slice::<CodexSessionLogEntry<'_>>(&line) else {
                     continue;
                 };
@@ -265,9 +289,8 @@ pub(super) fn visit_codex_session_file_with_weekly_limits(
                     &session_id,
                     value,
                     &mut previous_totals,
-                    &mut current_model,
-                    &mut current_model_is_fallback,
-                    &mut current_service_tier,
+                    &mut context,
+                    turn_context_effort,
                     &mut visit_filtered,
                 )?;
             }
@@ -277,8 +300,7 @@ pub(super) fn visit_codex_session_file_with_weekly_limits(
                         &session_id,
                         &value,
                         &fallback_timestamp,
-                        &mut current_model,
-                        &mut current_model_is_fallback,
+                        &mut context,
                         &mut visit_filtered,
                     )?;
                 } else {
@@ -286,8 +308,7 @@ pub(super) fn visit_codex_session_file_with_weekly_limits(
                         &session_id,
                         &line,
                         &fallback_timestamp,
-                        &mut current_model,
-                        &mut current_model_is_fallback,
+                        &mut context,
                         &mut visit_filtered,
                     )?;
                 };
@@ -302,16 +323,22 @@ fn visit_codex_session_entry(
     session_id: &str,
     value: CodexSessionLogEntry<'_>,
     previous_totals: &mut Option<CodexRawUsage>,
-    current_model: &mut Option<String>,
-    current_model_is_fallback: &mut bool,
-    current_service_tier: &mut Option<CodexServiceTier>,
-    visit: &mut impl FnMut(CodexTokenUsageEvent, Option<CodexWeeklyRateLimitObservation>) -> Result<()>,
+    context: &mut CodexSessionContext,
+    turn_context_effort: Option<CodexReasoningEffort>,
+    visit: &mut impl FnMut(
+        CodexTokenUsageEvent,
+        CodexReasoningEffort,
+        Option<CodexWeeklyRateLimitObservation>,
+    ) -> Result<()>,
 ) -> Result<()> {
     let entry_type = value.entry_type.as_deref();
     if entry_type == Some("turn_context") {
         if let Some(model) = value.payload.as_ref().and_then(codex_model_from_payload) {
-            *current_model = Some(model);
-            *current_model_is_fallback = false;
+            context.model = Some(model);
+            context.model_is_fallback = false;
+        }
+        if let Some(reasoning_effort) = turn_context_effort {
+            context.reasoning_effort = reasoning_effort;
         }
         return Ok(());
     }
@@ -335,7 +362,7 @@ fn visit_codex_session_entry(
             .as_ref()
             .and_then(|settings| settings.service_tier.as_deref())
         {
-            *current_service_tier = codex_service_tier(recorded);
+            context.service_tier = codex_service_tier(recorded);
         }
         return Ok(());
     }
@@ -376,8 +403,8 @@ fn visit_codex_session_entry(
     let (model, is_fallback_model) = resolve_codex_usage_model(
         parsed_model,
         &timestamp,
-        current_model,
-        current_model_is_fallback,
+        &mut context.model,
+        &mut context.model_is_fallback,
     );
 
     visit(
@@ -392,8 +419,9 @@ fn visit_codex_session_entry(
             reasoning_output_tokens: raw_usage.reasoning_output_tokens,
             total_tokens: raw_usage.total_tokens,
             is_fallback_model,
-            service_tier: *current_service_tier,
+            service_tier: context.service_tier,
         },
+        context.reasoning_effort,
         weekly_limit,
     )
 }
@@ -416,9 +444,12 @@ fn add_codex_exec_event(
     session_id: &str,
     value: &CodexLogEntry<'_>,
     fallback_timestamp: &str,
-    current_model: &mut Option<String>,
-    current_model_is_fallback: &mut bool,
-    visit: &mut impl FnMut(CodexTokenUsageEvent, Option<CodexWeeklyRateLimitObservation>) -> Result<()>,
+    context: &mut CodexSessionContext,
+    visit: &mut impl FnMut(
+        CodexTokenUsageEvent,
+        CodexReasoningEffort,
+        Option<CodexWeeklyRateLimitObservation>,
+    ) -> Result<()>,
 ) -> Result<()> {
     let Some(raw_usage) = normalize_headless_codex_usage(value) else {
         return Ok(());
@@ -434,8 +465,7 @@ fn add_codex_exec_event(
         raw_usage,
         parsed_model,
         timestamps,
-        current_model,
-        current_model_is_fallback,
+        context,
         visit,
     )
 }
@@ -444,9 +474,12 @@ fn add_codex_exec_event_from_value(
     session_id: &str,
     line: &[u8],
     fallback_timestamp: &str,
-    current_model: &mut Option<String>,
-    current_model_is_fallback: &mut bool,
-    visit: &mut impl FnMut(CodexTokenUsageEvent, Option<CodexWeeklyRateLimitObservation>) -> Result<()>,
+    context: &mut CodexSessionContext,
+    visit: &mut impl FnMut(
+        CodexTokenUsageEvent,
+        CodexReasoningEffort,
+        Option<CodexWeeklyRateLimitObservation>,
+    ) -> Result<()>,
 ) -> Result<()> {
     let Ok(value) = serde_json::from_slice::<Value>(line) else {
         return Ok(());
@@ -466,8 +499,7 @@ fn add_codex_exec_event_from_value(
         raw_usage,
         parsed_model,
         timestamps,
-        current_model,
-        current_model_is_fallback,
+        context,
         visit,
     )
 }
@@ -477,16 +509,19 @@ fn visit_codex_exec_usage_event(
     raw_usage: CodexRawUsage,
     parsed_model: Option<String>,
     timestamps: CodexExecTimestamps,
-    current_model: &mut Option<String>,
-    current_model_is_fallback: &mut bool,
-    visit: &mut impl FnMut(CodexTokenUsageEvent, Option<CodexWeeklyRateLimitObservation>) -> Result<()>,
+    context: &mut CodexSessionContext,
+    visit: &mut impl FnMut(
+        CodexTokenUsageEvent,
+        CodexReasoningEffort,
+        Option<CodexWeeklyRateLimitObservation>,
+    ) -> Result<()>,
 ) -> Result<()> {
     let raw_usage = normalize_codex_raw_usage(raw_usage);
     let (model, is_fallback_model) = resolve_codex_usage_model(
         parsed_model,
         &timestamps.model,
-        current_model,
-        current_model_is_fallback,
+        &mut context.model,
+        &mut context.model_is_fallback,
     );
     visit(
         CodexTokenUsageEvent {
@@ -502,6 +537,7 @@ fn visit_codex_exec_usage_event(
             is_fallback_model,
             service_tier: None,
         },
+        context.reasoning_effort,
         None,
     )
 }
@@ -522,10 +558,10 @@ fn codex_line_usage_kind(line: &[u8]) -> Option<CodexLineKind> {
     let has_token_count = has_event_msg && TOKEN_COUNT_TYPE_FINDER.find(line).is_some();
     let has_thread_settings_applied =
         has_event_msg && THREAD_SETTINGS_APPLIED_TYPE_FINDER.find(line).is_some();
-    if TURN_CONTEXT_TYPE_FINDER.find(line).is_some()
-        || has_token_count
-        || has_thread_settings_applied
-    {
+    if TURN_CONTEXT_TYPE_FINDER.find(line).is_some() {
+        return Some(CodexLineKind::TurnContext);
+    }
+    if has_token_count || has_thread_settings_applied {
         return Some(CodexLineKind::Session);
     }
     let has_compact_type = COMPACT_TYPE_FIELD_FINDER.find(line).is_some();
@@ -544,7 +580,10 @@ fn codex_line_usage_kind(line: &[u8]) -> Option<CodexLineKind> {
     {
         let (has_turn_context, has_event_msg, has_token_count, has_thread_settings_applied) =
             codex_line_type_flags(line);
-        if has_turn_context || (has_event_msg && (has_token_count || has_thread_settings_applied)) {
+        if has_turn_context {
+            return Some(CodexLineKind::TurnContext);
+        }
+        if has_event_msg && (has_token_count || has_thread_settings_applied) {
             return Some(CodexLineKind::Session);
         }
     }
@@ -610,6 +649,29 @@ fn skip_json_whitespace(line: &[u8], mut index: usize) -> usize {
         index += 1;
     }
     index
+}
+
+fn codex_reasoning_effort(line: &[u8]) -> CodexReasoningEffort {
+    if let Some(index) = EFFORT_FIELD_FINDER.find(line) {
+        let value = &line[index + br#""effort":""#.len()..];
+        if let Some(end) = memchr::memchr(b'"', value)
+            && !value[..end].contains(&b'\\')
+            && let Ok(value) = std::str::from_utf8(&value[..end])
+        {
+            return CodexReasoningEffort::from_recorded(Some(value));
+        }
+    }
+    if EFFORT_KEY_FINDER.find(line).is_none() {
+        return CodexReasoningEffort::Missing;
+    }
+    let value = serde_json::from_slice::<Value>(line).ok();
+    CodexReasoningEffort::from_recorded(
+        value
+            .as_ref()
+            .and_then(|value| value.get("payload"))
+            .and_then(|payload| payload.get("effort"))
+            .and_then(Value::as_str),
+    )
 }
 
 fn codex_session_timestamp(value: Option<&CodexTimestamp<'_>>) -> Option<String> {
@@ -1166,6 +1228,32 @@ mod tests {
                 "unexpected tier for {value:?}"
             );
         }
+    }
+
+    #[test]
+    fn parses_compact_and_noncompact_reasoning_effort_fields() {
+        assert_eq!(
+            codex_reasoning_effort(
+                br#"{"type":"turn_context","payload":{"model":"gpt-test","effort":"high"}}"#,
+            ),
+            CodexReasoningEffort::High
+        );
+        assert_eq!(
+            codex_reasoning_effort(
+                br#"{ "type": "turn_context", "payload": { "effort" : "low" } }"#,
+            ),
+            CodexReasoningEffort::Low
+        );
+        assert_eq!(
+            codex_reasoning_effort(
+                br#"{"type":"turn_context","payload":{"effort":"vendor\"level"}}"#,
+            ),
+            CodexReasoningEffort::Custom
+        );
+        assert_eq!(
+            codex_reasoning_effort(br#"{"type":"turn_context","payload":{}}"#),
+            CodexReasoningEffort::Missing
+        );
     }
 
     #[test]

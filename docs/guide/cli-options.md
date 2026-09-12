@@ -69,6 +69,8 @@ ccusage daily --json --breakdown
 
 `--no-cost` removes cost columns from table output and removes cost fields such as `totalCost`, `costUSD`, and `cost` from JSON output.
 
+For focused Codex reports, `--breakdown` partitions each model by recorded reasoning effort. Without the flag, Codex keeps its existing per-model output and does not build the extra model-and-effort buckets.
+
 ### Cost Calculation Mode
 
 Choose how costs are calculated:

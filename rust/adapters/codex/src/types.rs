@@ -18,6 +18,78 @@ pub enum CodexServiceTier {
     Fast,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CodexReasoningEffort {
+    #[default]
+    Disabled,
+    Missing,
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+    Persistent,
+    Custom,
+    Conflict,
+}
+
+impl CodexReasoningEffort {
+    pub(crate) fn from_recorded(value: Option<&str>) -> Self {
+        match value.map(str::trim).filter(|value| !value.is_empty()) {
+            None => Self::Missing,
+            Some("none") => Self::None,
+            Some("minimal") => Self::Minimal,
+            Some("low") => Self::Low,
+            Some("medium") => Self::Medium,
+            Some("high") => Self::High,
+            Some("xhigh") => Self::XHigh,
+            Some("max") => Self::Max,
+            Some("ultra") => Self::Ultra,
+            Some("persistent") => Self::Persistent,
+            Some(_) => Self::Custom,
+        }
+    }
+
+    pub(crate) fn merge(self, incoming: Self) -> Self {
+        match (self, incoming) {
+            (Self::Disabled, incoming) => incoming,
+            (current, Self::Disabled) => current,
+            (Self::Conflict, _) | (_, Self::Conflict) => Self::Conflict,
+            (Self::Missing, incoming) => incoming,
+            (current, Self::Missing) => current,
+            (current, incoming) if current == incoming => current,
+            _ => Self::Conflict,
+        }
+    }
+
+    pub(crate) const fn reporting_bucket(self) -> Option<Self> {
+        match self {
+            Self::Disabled => None,
+            Self::Conflict => Some(Self::Missing),
+            effort => Some(effort),
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Disabled | Self::Missing | Self::Conflict => "unknown",
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+            Self::Persistent => "persistent",
+            Self::Custom => "custom",
+        }
+    }
+}
+
 pub const fn merge_codex_service_tiers(
     current: Option<CodexServiceTier>,
     incoming: Option<CodexServiceTier>,

@@ -11,7 +11,10 @@ use crate::{
     print_missing_pricing_warnings_for_models, sanitize_terminal_text,
 };
 
-use super::speed::CodexSpeedPolicy;
+use super::{
+    aggregate::{CodexModelReasoningEffort, CodexReasoningEffortGroups},
+    speed::CodexSpeedPolicy,
+};
 
 pub(super) fn report_from_groups(
     groups: &BTreeMap<String, CodexGroup>,
@@ -19,11 +22,44 @@ pub(super) fn report_from_groups(
     pricing: &PricingMap,
     speed: CodexSpeedPolicy,
 ) -> Value {
+    report_from_groups_inner(groups, None, kind, pricing, speed)
+}
+
+pub(super) fn report_from_groups_with_reasoning_effort(
+    groups: &BTreeMap<String, CodexGroup>,
+    reasoning_effort_groups: &CodexReasoningEffortGroups,
+    kind: AgentReportKind,
+    pricing: &PricingMap,
+    speed: CodexSpeedPolicy,
+) -> Value {
+    report_from_groups_inner(groups, Some(reasoning_effort_groups), kind, pricing, speed)
+}
+
+fn report_from_groups_inner(
+    groups: &BTreeMap<String, CodexGroup>,
+    reasoning_effort_groups: Option<&CodexReasoningEffortGroups>,
+    kind: AgentReportKind,
+    pricing: &PricingMap,
+    speed: CodexSpeedPolicy,
+) -> Value {
     let rows = groups
         .iter()
-        .map(|(period, group)| group_json(period, group, kind, pricing, speed))
+        .map(|(period, group)| {
+            group_json(
+                period,
+                group,
+                reasoning_effort_groups.and_then(|groups| groups.get(period)),
+                kind,
+                pricing,
+                speed,
+            )
+        })
         .collect::<Vec<_>>();
-    let totals = totals_json(groups.values(), pricing, speed);
+    let mut totals = totals_json(groups.values(), pricing, speed);
+    if let Some(reasoning_effort_groups) = reasoning_effort_groups {
+        totals["reasoningEffortBreakdowns"] =
+            reasoning_effort_totals_json(reasoning_effort_groups.values(), pricing, speed);
+    }
     json!({
         rows_key(kind): rows,
         "totals": totals,
@@ -51,6 +87,7 @@ fn period_key(kind: AgentReportKind) -> &'static str {
 fn group_json(
     period: &str,
     group: &CodexGroup,
+    reasoning_effort_breakdowns: Option<&BTreeMap<CodexModelReasoningEffort, CodexModelUsage>>,
     kind: AgentReportKind,
     pricing: &PricingMap,
     speed: CodexSpeedPolicy,
@@ -83,6 +120,10 @@ fn group_json(
         row["sessionFile"] = json!(separator.map_or(period, |index| &period[index + 1..]));
         row["directory"] = json!(separator.map_or("", |index| &period[..index]));
     }
+    if let Some(reasoning_effort_breakdowns) = reasoning_effort_breakdowns {
+        row["reasoningEffortBreakdowns"] =
+            reasoning_effort_breakdowns_json(reasoning_effort_breakdowns, pricing, speed);
+    }
     row
 }
 
@@ -108,6 +149,47 @@ fn model_usage_json(usage: &CodexModelUsage) -> Value {
         "totalTokens": usage.total_tokens,
         "isFallback": usage.is_fallback,
     })
+}
+
+fn reasoning_effort_breakdowns_json(
+    breakdowns: &BTreeMap<CodexModelReasoningEffort, CodexModelUsage>,
+    pricing: &PricingMap,
+    speed: CodexSpeedPolicy,
+) -> Value {
+    Value::Array(
+        breakdowns
+            .iter()
+            .map(|(key, usage)| {
+                let mut value = model_usage_json(usage);
+                value["model"] = json!(key.model.as_str());
+                value["reasoningEffort"] = json!(key.reasoning_effort.label());
+                value["costUSD"] = json_float(calculate_codex_model_cost(
+                    key.model.as_str(),
+                    usage,
+                    pricing,
+                    speed,
+                ));
+                value
+            })
+            .collect(),
+    )
+}
+
+fn reasoning_effort_totals_json<'a>(
+    groups: impl Iterator<Item = &'a BTreeMap<CodexModelReasoningEffort, CodexModelUsage>>,
+    pricing: &PricingMap,
+    speed: CodexSpeedPolicy,
+) -> Value {
+    let mut totals = BTreeMap::<CodexModelReasoningEffort, CodexModelUsage>::new();
+    for group in groups {
+        for (key, usage) in group {
+            super::aggregate::merge_codex_model_usage(
+                totals.entry(key.clone()).or_default(),
+                usage.clone(),
+            );
+        }
+    }
+    reasoning_effort_breakdowns_json(&totals, pricing, speed)
 }
 
 fn totals_json<'a>(
@@ -445,6 +527,58 @@ fn codex_table_row(
     (row, input_tokens, cost)
 }
 
+fn codex_reasoning_effort_table_row(
+    key: &CodexModelReasoningEffort,
+    usage: &CodexModelUsage,
+    pricing: &PricingMap,
+    speed: CodexSpeedPolicy,
+    shared: &SharedArgs,
+    terminal_width: usize,
+) -> Vec<String> {
+    let input_tokens = non_cached_input_tokens(
+        usage.input_tokens,
+        usage.cached_input_tokens,
+        usage.cache_creation_tokens,
+    );
+    let cost = calculate_codex_model_cost(key.model.as_str(), usage, pricing, speed);
+    let model = sanitize_terminal_text(key.model.as_str());
+    let (label, model) = if terminal_width <= 120 {
+        (
+            String::new(),
+            format!("{}\n{}", model, key.reasoning_effort.label()),
+        )
+    } else {
+        (format!("  {}", key.reasoning_effort.label()), model)
+    };
+    let mut row = vec![
+        color(shared, label, Color::Grey),
+        color(shared, model, Color::Grey),
+        color(shared, format_number(input_tokens), Color::Grey),
+        color(shared, format_number(usage.output_tokens), Color::Grey),
+        color(
+            shared,
+            format_number(usage.reasoning_output_tokens),
+            Color::Grey,
+        ),
+        color(
+            shared,
+            format_number(usage.cache_creation_tokens),
+            Color::Grey,
+        ),
+        color(
+            shared,
+            format_number(usage.cached_input_tokens),
+            Color::Grey,
+        ),
+        color(shared, format_number(usage.total_tokens), Color::Grey),
+        color(shared, format_currency(cost), Color::Grey),
+    ];
+    if shared.no_cost {
+        row.pop();
+    }
+    row
+}
+
 fn codex_table_label(label: &str, kind: AgentReportKind, terminal_width: usize) -> String {
     let label = sanitize_terminal_text(label);
     if matches!(kind, AgentReportKind::Daily) && terminal_width <= 120 {
@@ -526,6 +660,35 @@ pub(super) fn print_table_from_groups(
     speed: CodexSpeedPolicy,
     shared: &SharedArgs,
 ) -> Result<()> {
+    print_table_from_groups_inner(groups, None, kind, pricing, speed, shared)
+}
+
+pub(super) fn print_table_from_groups_with_reasoning_effort(
+    groups: &BTreeMap<String, CodexGroup>,
+    reasoning_effort_groups: &CodexReasoningEffortGroups,
+    kind: AgentReportKind,
+    pricing: &PricingMap,
+    speed: CodexSpeedPolicy,
+    shared: &SharedArgs,
+) -> Result<()> {
+    print_table_from_groups_inner(
+        groups,
+        Some(reasoning_effort_groups),
+        kind,
+        pricing,
+        speed,
+        shared,
+    )
+}
+
+fn print_table_from_groups_inner(
+    groups: &BTreeMap<String, CodexGroup>,
+    reasoning_effort_groups: Option<&CodexReasoningEffortGroups>,
+    kind: AgentReportKind,
+    pricing: &PricingMap,
+    speed: CodexSpeedPolicy,
+    shared: &SharedArgs,
+) -> Result<()> {
     if groups.is_empty() {
         eprintln!("No Codex usage data found.");
         return Ok(());
@@ -566,6 +729,18 @@ pub(super) fn print_table_from_groups(
         );
         totals.add(group, input_tokens, cost);
         table.push(row);
+        if let Some(breakdowns) = reasoning_effort_groups.and_then(|groups| groups.get(label)) {
+            for (key, usage) in breakdowns {
+                table.push(codex_reasoning_effort_table_row(
+                    key,
+                    usage,
+                    pricing,
+                    speed,
+                    shared,
+                    terminal_width,
+                ));
+            }
+        }
     }
     table.separator();
     table.push(codex_table_total_row(&totals, shared, shared.no_cost));
@@ -621,6 +796,77 @@ mod tests {
         assert_eq!(headers.len(), aligns.len());
         assert_eq!(row[5], "30");
         assert_eq!(total_row[5], "30");
+    }
+
+    #[test]
+    fn snapshots_reasoning_effort_breakdown_table_row() {
+        let key = CodexModelReasoningEffort {
+            model: "gpt-test".into(),
+            reasoning_effort: crate::types::CodexReasoningEffort::High,
+        };
+        let usage = CodexModelUsage {
+            input_tokens: 100,
+            cached_input_tokens: 80,
+            output_tokens: 10,
+            reasoning_output_tokens: 5,
+            total_tokens: 110,
+            ..CodexModelUsage::default()
+        };
+        let shared = SharedArgs {
+            no_color: true,
+            no_cost: true,
+            ..SharedArgs::default()
+        };
+
+        insta::assert_snapshot!(
+            codex_reasoning_effort_table_row(
+                &key,
+                &usage,
+                &PricingMap::default(),
+                CodexSpeedPolicy::Forced(CodexServiceTier::Standard),
+                &shared,
+                160,
+            )
+            .join(" | "),
+            @"  high | gpt-test | 20 | 10 | 5 | 0 | 80 | 110"
+        );
+    }
+
+    #[test]
+    fn snapshots_narrow_reasoning_effort_breakdown_table_row() {
+        let key = CodexModelReasoningEffort {
+            model: "gpt-test".into(),
+            reasoning_effort: crate::types::CodexReasoningEffort::Persistent,
+        };
+        let usage = CodexModelUsage {
+            input_tokens: 100,
+            cached_input_tokens: 80,
+            output_tokens: 10,
+            reasoning_output_tokens: 5,
+            total_tokens: 110,
+            ..CodexModelUsage::default()
+        };
+        let shared = SharedArgs {
+            no_color: true,
+            no_cost: true,
+            ..SharedArgs::default()
+        };
+
+        insta::assert_snapshot!(
+            codex_reasoning_effort_table_row(
+                &key,
+                &usage,
+                &PricingMap::default(),
+                CodexSpeedPolicy::Forced(CodexServiceTier::Standard),
+                &shared,
+                100,
+            )
+            .join(" | "),
+            @"
+         | gpt-test
+        persistent | 20 | 10 | 5 | 0 | 80 | 110
+        "
+        );
     }
 
     #[test]

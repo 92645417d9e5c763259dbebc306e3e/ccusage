@@ -41,7 +41,7 @@ CODEX_HOME="$HOME/.codex,$HOME/.codex-work,$HOME/codex-exec-logs" ccusage codex 
 | `ccusage codex session` | Group usage by Codex session | [Session Usage](/guide/session-reports) |
 | `ccusage codex quota`   | Estimate weekly quota cost   | [JSON Output](/guide/json-output)       |
 
-The usage views support `--json`, `--compact`, `--offline`, and `--speed auto|standard|fast`. The quota view supports `--json`, `--offline`, and the same speed overrides.
+The usage views support `--json`, `--breakdown`, `--compact`, `--offline`, and `--speed auto|standard|fast`. The quota view supports `--json`, `--offline`, and the same speed overrides.
 
 ## Monthly Example
 
@@ -51,6 +51,7 @@ The usage views support `--json`, `--compact`, `--offline`, and `--speed auto|st
 
 - **Token deltas** – Each `event_msg` with `payload.type === "token_count"` reports cumulative totals and, when available, the latest request delta. Current MultiAgent V2 subagent rollouts can persist a replayed parent-history prefix; the CLI uses the final inherited snapshot as the child baseline, then counts only advancing usage from the child turn. Older Codex replay formats retain timestamp-based compatibility handling.
 - **Per-model grouping** – The active `turn_context` specifies the model for newly counted usage. Replayed parent contexts in current MultiAgent V2 subagent prefixes remain inherited history and do not add model usage to the child. We aggregate tokens per day/month and per model. Sessions lacking model metadata (seen in early September 2025 builds) are skipped.
+- **Reasoning-effort grouping** - Add `--breakdown` to partition each model by the active `turn_context.payload.effort`, including separate cache-read, cache-creation, token, and cost values. The default path does not build these extra buckets. Missing effort and conflicting duplicate metadata use `unknown`; unrecognized non-empty values use `custom`.
 - **Pricing** – Rates come from LiteLLM's pricing dataset via the shared `LiteLLMPricingFetcher`. Codex's internal review label is resolved to the newest known model for the log date before pricing is calculated.
 - **Scheduled pricing** – DeepSeek V4 Flash and Pro use each event's timestamp: legacy rates apply before `2026-08-16T16:00:00Z`, and the later rates use UTC weekday peak windows of `01:00–04:00` and `06:00–10:00` (endpoints excluded). Cache creation follows the scheduled input rate.
 - **Speed pricing** – `--speed auto` is the default. For rollouts written by Codex CLI 0.144.0 and later, ccusage applies recorded `thread_settings_applied` tier changes chronologically: `priority` and legacy `fast` use Fast pricing, while `default` uses Standard pricing. Unmarked usage falls back to `config.toml` detection. Pass `--speed fast` or `--speed standard` to override every recorded tier. Fast pricing uses a model-specific multiplier only when one is available; otherwise, ccusage keeps standard pricing rather than inventing a rate.
@@ -93,10 +94,13 @@ Codex focused views use the same JSON mode as the shared reports:
 
 ```bash
 ccusage codex daily --json
+ccusage codex daily --json --breakdown
 ccusage codex monthly --json
 ccusage codex session --json
 ccusage codex quota --json
 ```
+
+With `--breakdown`, each row and `totals` add a `reasoningEffortBreakdowns` array. Every item keeps `model` and `reasoningEffort` as separate fields and includes the same token categories, `costUSD`, and `isFallback`. The existing `models` object and overall totals remain unchanged, and pricing still uses the base model rather than treating reasoning effort as a different priced model.
 
 Session JSON includes per-model breakdowns, cached token counts, `lastActivity`, and `isFallback` flags for any events that required the legacy `gpt-5` pricing fallback.
 

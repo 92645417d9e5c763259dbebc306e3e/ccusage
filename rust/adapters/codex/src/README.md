@@ -18,6 +18,15 @@ Relevant JSONL event:
 - `payload.info.last_token_usage` is the current turn delta.
 - If only cumulative totals exist, subtract prior totals to recover deltas.
 
+Relevant turn context:
+
+- `type === "turn_context"`
+- `payload.model` becomes the active model for following usage.
+- `payload.effort` becomes the active reasoning effort for following usage.
+- Reasoning effort is collected only for `--breakdown`; the default aggregation path does not build model-and-effort buckets.
+- Missing effort and conflicting metadata on duplicate usage are grouped as `unknown`.
+- Unrecognized non-empty effort values are grouped as `custom`.
+
 Relevant speed-setting event in Codex CLI 0.144.0 and later:
 
 - `type === "event_msg"`
@@ -60,4 +69,4 @@ Token mapping:
 - `reasoning_output_tokens` - informational breakdown; already included in output billing.
 - `total_tokens` - provided directly or recomputed as input plus output for legacy entries.
 
-Pricing uses model metadata from `turn_context`. Early sessions without metadata fall back to `gpt-5`, mark `isFallbackModel === true`, and expose fallback rows as approximate in aggregate JSON.
+Pricing uses model metadata from `turn_context`. Reasoning effort partitions usage for `--breakdown`, but the base model remains the pricing identity. Early sessions without metadata fall back to `gpt-5`, mark `isFallbackModel === true`, and expose fallback rows as approximate in aggregate JSON.

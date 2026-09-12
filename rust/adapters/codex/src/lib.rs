@@ -40,7 +40,10 @@ pub use types::{
 pub(crate) use types::{CodexRawUsage, merge_codex_service_tiers};
 
 use quota::{print_quota_table, quota_report_json};
-use report::{print_table_from_groups, report_from_groups};
+use report::{
+    print_table_from_groups, print_table_from_groups_with_reasoning_effort, report_from_groups,
+    report_from_groups_with_reasoning_effort,
+};
 
 use crate::cli::{AgentReportKind, CodexSpeed};
 
@@ -53,13 +56,36 @@ pub fn run(args: AgentCommandArgs) -> Result<()> {
         log_level() != Some(0),
         shared.pricing_overrides.iter(),
     );
-    let groups = load_groups(&shared, args.kind)?;
+    let data = aggregate::load_report_data(&shared, args.kind)?;
     let speed = resolve_codex_speed(args.codex_speed);
     if wants_json(&shared) {
-        let output = report_from_groups(&groups, args.kind, &pricing, speed);
+        let output = data.reasoning_effort_groups.as_ref().map_or_else(
+            || report_from_groups(&data.groups, args.kind, &pricing, speed),
+            |reasoning_effort_groups| {
+                report_from_groups_with_reasoning_effort(
+                    &data.groups,
+                    reasoning_effort_groups,
+                    args.kind,
+                    &pricing,
+                    speed,
+                )
+            },
+        );
         return print_json_or_jq(output, shared.jq.as_deref(), shared.no_cost);
     }
-    print_table_from_groups(&groups, args.kind, &pricing, speed, &shared)
+    data.reasoning_effort_groups.as_ref().map_or_else(
+        || print_table_from_groups(&data.groups, args.kind, &pricing, speed, &shared),
+        |reasoning_effort_groups| {
+            print_table_from_groups_with_reasoning_effort(
+                &data.groups,
+                reasoning_effort_groups,
+                args.kind,
+                &pricing,
+                speed,
+                &shared,
+            )
+        },
+    )
 }
 
 pub fn run_quota(args: CodexQuotaArgs) -> Result<()> {
@@ -104,8 +130,8 @@ pub fn report_json(
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::aggregate::load_groups_from_directory;
-    use super::report::report_from_groups;
+    use super::aggregate::{load_groups_from_directory, load_report_data_from_directory};
+    use super::report::{report_from_groups, report_from_groups_with_reasoning_effort};
     use super::*;
     use crate::cli::SharedArgs;
     use crate::{CodexModelUsage, CodexServiceTier, CodexTokenUsageEvent, CodexUsageBucket};
@@ -214,6 +240,120 @@ mod tests {
         assert_eq!(group.output_tokens, 75);
         assert_eq!(group.reasoning_output_tokens, 5);
         assert_eq!(group.total_tokens, 280);
+    }
+
+    #[test]
+    fn reports_codex_usage_by_model_and_reasoning_effort_when_requested() {
+        let sessions_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/reasoning-effort");
+        let shared = SharedArgs {
+            breakdown: true,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+        let mut pricing = PricingMap::default();
+        pricing.load_json(
+            r#"{
+                "gpt-test": {
+                    "input_cost_per_token": 0.000001,
+                    "output_cost_per_token": 0.000010,
+                    "cache_read_input_token_cost": 0.0000001,
+                    "cache_creation_input_token_cost": 0.000002
+                }
+            }"#,
+        );
+
+        let data =
+            load_report_data_from_directory(&sessions_dir, &shared, AgentReportKind::Daily, true)
+                .unwrap();
+        let report = report_from_groups_with_reasoning_effort(
+            &data.groups,
+            data.reasoning_effort_groups.as_ref().unwrap(),
+            AgentReportKind::Daily,
+            &pricing,
+            CodexSpeedPolicy::Forced(CodexServiceTier::Standard),
+        );
+
+        let row = &report["daily"][0];
+        let breakdowns = row["reasoningEffortBreakdowns"].as_array().unwrap();
+        let by_effort = breakdowns
+            .iter()
+            .map(|item| (item["reasoningEffort"].as_str().unwrap(), item))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(by_effort.len(), 3);
+        assert_eq!(by_effort["high"]["model"], "gpt-test");
+        assert_eq!(by_effort["high"]["inputTokens"], 20);
+        assert_eq!(by_effort["high"]["cacheReadTokens"], 80);
+        assert_eq!(by_effort["low"]["inputTokens"], 130);
+        assert_eq!(by_effort["low"]["cacheCreationTokens"], 20);
+        assert_eq!(by_effort["unknown"]["inputTokens"], 50);
+        let breakdown_cost = breakdowns
+            .iter()
+            .map(|item| item["costUSD"].as_f64().unwrap())
+            .sum::<f64>();
+        assert!((breakdown_cost - row["costUSD"].as_f64().unwrap()).abs() < 1e-12);
+        assert_eq!(
+            report["totals"]["reasoningEffortBreakdowns"],
+            row["reasoningEffortBreakdowns"]
+        );
+    }
+
+    #[test]
+    fn leaves_reasoning_effort_out_of_default_codex_json() {
+        let sessions_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/reasoning-effort");
+        let shared = SharedArgs {
+            single_thread: true,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+
+        let groups =
+            load_groups_from_directory(&sessions_dir, &shared, AgentReportKind::Daily).unwrap();
+        let report = report_from_groups(
+            &groups,
+            AgentReportKind::Daily,
+            &PricingMap::default(),
+            CodexSpeedPolicy::Forced(CodexServiceTier::Standard),
+        );
+
+        assert!(
+            report["daily"][0]
+                .get("reasoningEffortBreakdowns")
+                .is_none()
+        );
+        assert!(report["totals"].get("reasoningEffortBreakdowns").is_none());
+    }
+
+    #[test]
+    fn dedupes_conflicting_reasoning_effort_as_unknown() {
+        let sessions_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/reasoning-effort-conflict");
+        let shared = SharedArgs {
+            breakdown: true,
+            single_thread: true,
+            timezone: Some("UTC".to_string()),
+            ..SharedArgs::default()
+        };
+
+        let data =
+            load_report_data_from_directory(&sessions_dir, &shared, AgentReportKind::Daily, true)
+                .unwrap();
+        let report = report_from_groups_with_reasoning_effort(
+            &data.groups,
+            data.reasoning_effort_groups.as_ref().unwrap(),
+            AgentReportKind::Daily,
+            &PricingMap::default(),
+            CodexSpeedPolicy::Forced(CodexServiceTier::Standard),
+        );
+
+        assert_eq!(report["daily"][0]["inputTokens"], 20);
+        let breakdowns = report["daily"][0]["reasoningEffortBreakdowns"]
+            .as_array()
+            .unwrap();
+        assert_eq!(breakdowns.len(), 1);
+        assert_eq!(breakdowns[0]["reasoningEffort"], "unknown");
+        assert_eq!(breakdowns[0]["cacheReadTokens"], 80);
     }
 
     #[test]
