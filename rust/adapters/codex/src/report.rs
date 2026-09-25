@@ -263,6 +263,84 @@ pub fn calculate_codex_model_cost(
     )
 }
 
+/// Price the short- and long-context portions of one model separately.
+///
+/// The split is made on each timestamped usage bucket, before applying that
+/// timestamp's price and recorded service tier. Summing the two values gives
+/// the same charge as [`calculate_codex_model_cost`].
+pub fn calculate_codex_model_context_costs(
+    model: &str,
+    usage: &CodexModelUsage,
+    pricing: &PricingMap,
+    speed: impl Into<CodexSpeedPolicy>,
+) -> (f64, f64) {
+    let speed = speed.into();
+    if !usage.timestamped_usage.is_empty() {
+        return usage
+            .timestamped_usage
+            .iter()
+            .filter_map(|(timestamp, timestamped_usage)| {
+                let pricing =
+                    pricing.find_at(model, crate::TimestampMs::from_millis(*timestamp))?;
+                Some(calculate_context_costs(
+                    timestamped_usage.usage,
+                    timestamped_usage.recorded_standard_usage,
+                    timestamped_usage.recorded_fast_usage,
+                    &pricing,
+                    speed,
+                ))
+            })
+            .fold((0.0, 0.0), |(short, long), (next_short, next_long)| {
+                (short + next_short, long + next_long)
+            });
+    }
+    let Some(pricing) = pricing.find(model) else {
+        return (0.0, 0.0);
+    };
+    calculate_context_costs(
+        model_usage_bucket(usage),
+        usage.recorded_standard_usage,
+        usage.recorded_fast_usage,
+        &pricing,
+        speed,
+    )
+}
+
+fn calculate_context_costs(
+    usage: CodexUsageBucket,
+    standard: CodexUsageBucket,
+    fast: CodexUsageBucket,
+    pricing: &crate::Pricing,
+    speed: CodexSpeedPolicy,
+) -> (f64, f64) {
+    let (short_usage, long_usage) = split_context_usage(usage);
+    let (short_standard, long_standard) = split_context_usage(standard);
+    let (short_fast, long_fast) = split_context_usage(fast);
+    (
+        calculate_codex_usage_cost(short_usage, short_standard, short_fast, pricing, speed),
+        calculate_codex_usage_cost(long_usage, long_standard, long_fast, pricing, speed),
+    )
+}
+
+fn split_context_usage(usage: CodexUsageBucket) -> (CodexUsageBucket, CodexUsageBucket) {
+    let long = CodexUsageBucket {
+        input_tokens: usage.long_context_input_tokens.min(usage.input_tokens),
+        cached_input_tokens: usage
+            .long_context_cached_input_tokens
+            .min(usage.cached_input_tokens),
+        cache_creation_tokens: usage
+            .long_context_cache_creation_tokens
+            .min(usage.cache_creation_tokens),
+        output_tokens: usage.long_context_output_tokens.min(usage.output_tokens),
+        long_context_input_tokens: usage.long_context_input_tokens,
+        long_context_cached_input_tokens: usage.long_context_cached_input_tokens,
+        long_context_cache_creation_tokens: usage.long_context_cache_creation_tokens,
+        long_context_output_tokens: usage.long_context_output_tokens,
+    };
+    let short = subtract_codex_usage_bucket(usage, long);
+    (short, long)
+}
+
 pub(super) fn calculate_codex_usage_cost_at(
     model: &str,
     timestamp: crate::TimestampMs,
@@ -756,6 +834,33 @@ fn print_table_from_groups_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_costs_partition_the_model_charge() {
+        let mut pricing = PricingMap::default();
+        assert_eq!(
+            pricing.load_json(
+                r#"{"gpt-test":{"input_cost_per_token":0.001,"output_cost_per_token":0.002,"input_cost_per_token_above_200k_tokens":0.003,"output_cost_per_token_above_200k_tokens":0.004}}"#,
+            ),
+            1,
+        );
+        let usage = CodexModelUsage {
+            input_tokens: 100,
+            cached_input_tokens: 20,
+            output_tokens: 20,
+            long_context_input_tokens: 40,
+            long_context_cached_input_tokens: 10,
+            long_context_output_tokens: 8,
+            ..CodexModelUsage::default()
+        };
+        let speed = CodexSpeedPolicy::Forced(CodexServiceTier::Standard);
+        let (short, long) =
+            calculate_codex_model_context_costs("gpt-test", &usage, &pricing, speed);
+        assert!(short > 0.0);
+        assert!(long > short);
+        let total = calculate_codex_model_cost("gpt-test", &usage, &pricing, speed);
+        assert!((short + long - total).abs() < 1e-12);
+    }
 
     #[test]
     fn non_cached_input_tokens_excludes_cache_reads_and_creation() {

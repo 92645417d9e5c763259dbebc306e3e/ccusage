@@ -29,8 +29,8 @@ pub use quota::{
     CodexWeeklyRateLimitObservation,
 };
 pub use report::{
-    calculate_codex_model_cost, calculate_group_cost, codex_model_missing_pricing,
-    non_cached_input_tokens,
+    calculate_codex_model_context_costs, calculate_codex_model_cost, calculate_group_cost,
+    codex_model_missing_pricing, non_cached_input_tokens,
 };
 pub use speed::{CodexSpeedPolicy, resolve_codex_speed};
 pub use types::{
